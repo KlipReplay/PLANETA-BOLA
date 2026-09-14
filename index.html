@@ -604,6 +604,7 @@
     <div class="filter-row">
       <div id="courts-filter-bar" style="display: flex; flex-wrap: wrap; gap: 8px;">
         <button class="court-btn active" onclick="filtrarQuadra('all', this)">Todas as Quadras (<span id="total-count">0</span>)</button>
+        <button class="court-btn" onclick="filtrarQuadra('Quadra 1', this)">Quadra 1</button>
       </div>
 
       <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
@@ -800,7 +801,11 @@
   </footer>
 
   <script>
-    const BACKEND_URL = "http://127.0.0.1:5000";
+    // Se estiver rodando local no navegador, aponta para 127.0.0.1:5000; caso contrário, use a URL do túnel
+    const BACKEND_URL = (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1" || window.location.protocol === "file:")
+      ? "http://127.0.0.1:5000"
+      : "https://nvidia-schema-drainage-framed.trycloudflare.com";
+
     let precoBase = 0.15;
     let replays = [];
     let isOnline = false;
@@ -864,7 +869,7 @@
               criado_em: v.criado_em || new Date().toISOString(),
               preview_url: v.preview_url || '',
               court: 'Quadra 1',
-              duration: 15,
+              duration: 20,
               highlightType: 'Lance gravado na quadra'
             }));
             isOnline = true;
@@ -887,6 +892,7 @@
     function atualizarStatusIndicador() {
       const dot = document.getElementById("online-indicator");
       const lbl = document.getElementById("status-label");
+      if (!dot || !lbl) return;
       if (isOnline) {
         dot.className = "status-dot online";
         lbl.textContent = "Ao Vivo";
@@ -898,16 +904,30 @@
 
     function atualizarAbasQuadras() {
       const container = document.getElementById("courts-filter-bar");
-      document.getElementById("total-count").textContent = replays.length;
-      container.innerHTML = `
-        <button class="court-btn ${selectedCourt === 'all' ? 'active' : ''}" onclick="filtrarQuadra('all', this)">Todas as Quadras (${replays.length})</button>
-        <button class="court-btn ${selectedCourt === 'Quadra 1' ? 'active' : ''}" onclick="filtrarQuadra('Quadra 1', this)">Quadra 1</button>
-      `;
+      const totalCount = document.getElementById("total-count");
+      
+      if (totalCount) {
+        totalCount.textContent = replays.length;
+      }
+      
+      if (container) {
+        container.innerHTML = `
+          <button class="court-btn ${selectedCourt === 'all' ? 'active' : ''}" onclick="filtrarQuadra('all', this)">
+            Todas as Quadras (<span id="total-count">${replays.length}</span>)
+          </button>
+          <button class="court-btn ${selectedCourt === 'Quadra 1' ? 'active' : ''}" onclick="filtrarQuadra('Quadra 1', this)">
+            Quadra 1
+          </button>
+        `;
+      }
     }
 
     function renderizarCards() {
       const grid = document.getElementById("replays-container");
-      const query = document.getElementById("search-box").value.trim().toLowerCase();
+      if (!grid) return;
+
+      const searchInput = document.getElementById("search-box");
+      const query = searchInput ? searchInput.value.trim().toLowerCase() : "";
       const now = Date.now();
       const maxAgeMs = timeFilterMinutes * 60 * 1000;
 
@@ -916,7 +936,7 @@
         if (!isNaN(vTime) && now - vTime > maxAgeMs) return false;
         if (selectedCourt !== 'all' && v.court !== selectedCourt) return false;
         if (query) {
-          const matchName = v.nome.toLowerCase().includes(query);
+          const matchName = (v.nome || "").toLowerCase().includes(query);
           if (!matchName) return false;
         }
         return true;
@@ -930,7 +950,7 @@
             <p style="font-size: 12px;">Não há lances gravados com os filtros atuais nos últimos ${timeFilterMinutes} minutos.</p>
           </div>
         `;
-        lucide.createIcons();
+        if (window.lucide) lucide.createIcons();
         return;
       }
 
@@ -983,40 +1003,42 @@
         const scrub = card.querySelector(`#scrub-${video.id}`);
         const wrap = card.querySelector(".thumb-holder");
 
-        wrap.addEventListener("mouseenter", () => {
-          vid.currentTime = 0;
-          vid.play().catch(() => {});
-        });
-        wrap.addEventListener("mouseleave", () => {
-          vid.pause();
-          vid.currentTime = 0;
-          if (scrub) scrub.style.width = "0%";
-        });
-        vid.addEventListener("timeupdate", () => {
-          if (vid.currentTime >= 5) {
+        if (wrap && vid) {
+          wrap.addEventListener("mouseenter", () => {
+            vid.currentTime = 0;
+            vid.play().catch(() => {});
+          });
+          wrap.addEventListener("mouseleave", () => {
+            vid.pause();
             vid.currentTime = 0;
             if (scrub) scrub.style.width = "0%";
-          } else if (scrub) {
-            scrub.style.width = `${(vid.currentTime / 5) * 100}%`;
-          }
-        });
+          });
+          vid.addEventListener("timeupdate", () => {
+            if (vid.currentTime >= 5) {
+              vid.currentTime = 0;
+              if (scrub) scrub.style.width = "0%";
+            } else if (scrub) {
+              scrub.style.width = `${(vid.currentTime / 5) * 100}%`;
+            }
+          });
+        }
 
         grid.appendChild(card);
       });
-      lucide.createIcons();
+      if (window.lucide) lucide.createIcons();
     }
 
     function filtrarQuadra(court, btn) {
       selectedCourt = court;
       document.querySelectorAll(".court-btn").forEach(b => b.classList.remove("active"));
-      btn.classList.add("active");
+      if (btn) btn.classList.add("active");
       renderizarCards();
     }
 
     function filtrarJanela(min, btn) {
       timeFilterMinutes = min;
       document.querySelectorAll(".time-btn").forEach(b => b.classList.remove("active"));
-      btn.classList.add("active");
+      if (btn) btn.classList.add("active");
       renderizarCards();
     }
 
@@ -1041,8 +1063,11 @@
       document.getElementById("checkout-highlight-text").textContent = selectedVideo.highlightType;
       document.getElementById("checkout-preview-video").src = selectedVideo.preview_url;
       document.getElementById("checkout-price-tag").textContent = formatCurrency(calcularPrecoFinal());
-      document.getElementById("coupon-input").value = "";
-      document.getElementById("coupon-feedback-msg").style.display = "none";
+      
+      const couponInput = document.getElementById("coupon-input");
+      if (couponInput) couponInput.value = "";
+      const feedbackMsg = document.getElementById("coupon-feedback-msg");
+      if (feedbackMsg) feedbackMsg.style.display = "none";
 
       mostrarPassoCheckout("pre");
       document.getElementById("checkout-modal").classList.add("open");
@@ -1050,23 +1075,29 @@
 
     function mostrarPassoCheckout(step) {
       ["pre", "loading", "qr", "approved"].forEach(s => {
-        document.getElementById(`step-${s}`).style.display = (s === step) ? "flex" : "none";
+        const el = document.getElementById(`step-${s}`);
+        if (el) el.style.display = (s === step) ? "flex" : "none";
       });
-      lucide.createIcons();
+      if (window.lucide) lucide.createIcons();
     }
 
     async function aplicarCupom() {
-      const code = document.getElementById("coupon-input").value.trim().toUpperCase();
+      const codeInput = document.getElementById("coupon-input");
+      const code = codeInput ? codeInput.value.trim().toUpperCase() : "";
       const fb = document.getElementById("coupon-feedback-msg");
       if (!code) {
-        fb.style.display = "block";
-        fb.style.color = "#f87171";
-        fb.textContent = "Digite o código do cupom.";
+        if (fb) {
+          fb.style.display = "block";
+          fb.style.color = "#f87171";
+          fb.textContent = "Digite o código do cupom.";
+        }
         return;
       }
-      fb.style.display = "block";
-      fb.style.color = "#94a3b8";
-      fb.textContent = "Validando cupom...";
+      if (fb) {
+        fb.style.display = "block";
+        fb.style.color = "#94a3b8";
+        fb.textContent = "Validando cupom...";
+      }
 
       try {
         const res = await fetch(`${BACKEND_URL}/validar-cupom`, {
@@ -1077,19 +1108,25 @@
         const d = await res.json();
         if (res.ok && d.valido) {
           appliedCoupon = { code: d.codigo, type: d.tipo === 'porcentagem' ? 'percent' : 'fixed', value: d.valor_desconto };
-          fb.style.color = "#00e676";
-          fb.textContent = `Cupom ${d.codigo} aplicado com sucesso!`;
+          if (fb) {
+            fb.style.color = "#00e676";
+            fb.textContent = `Cupom ${d.codigo} aplicado com sucesso!`;
+          }
           document.getElementById("checkout-price-tag").textContent = formatCurrency(d.preco_final);
         } else {
           appliedCoupon = null;
-          fb.style.color = "#f87171";
-          fb.textContent = d.erro || "Cupom inválido ou expirado.";
+          if (fb) {
+            fb.style.color = "#f87171";
+            fb.textContent = d.erro || "Cupom inválido ou expirado.";
+          }
           document.getElementById("checkout-price-tag").textContent = formatCurrency(precoBase);
         }
       } catch (e) {
         appliedCoupon = null;
-        fb.style.color = "#f87171";
-        fb.textContent = "Erro ao validar cupom com o servidor.";
+        if (fb) {
+          fb.style.color = "#f87171";
+          fb.textContent = "Erro ao validar cupom com o servidor.";
+        }
         document.getElementById("checkout-price-tag").textContent = formatCurrency(precoBase);
       }
     }
@@ -1142,7 +1179,8 @@
         timeLeft--;
         const m = String(Math.floor(timeLeft / 60)).padStart(2, '0');
         const s = String(timeLeft % 60).padStart(2, '0');
-        document.getElementById("expiration-timer").textContent = `⏱ Expira em ${m}:${s}`;
+        const timerEl = document.getElementById("expiration-timer");
+        if (timerEl) timerEl.textContent = `⏱ Expira em ${m}:${s}`;
         if (timeLeft <= 0) {
           clearInterval(pixCountdownInterval);
           clearInterval(pixPollingInterval);
@@ -1166,20 +1204,27 @@
       if (pixCountdownInterval) clearInterval(pixCountdownInterval);
       if (pixPollingInterval) clearInterval(pixPollingInterval);
 
-      confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
+      if (window.confetti) {
+        confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
+      }
       mostrarPassoCheckout("approved");
 
-      document.getElementById("btn-trigger-download").onclick = () => {
-        if (!token) return;
-        window.location.href = `${BACKEND_URL}/download/${token}`;
-      };
+      const downloadBtn = document.getElementById("btn-trigger-download");
+      if (downloadBtn) {
+        downloadBtn.onclick = () => {
+          if (!token) return;
+          window.location.href = `${BACKEND_URL}/download/${token}`;
+        };
+      }
     }
 
     function copiarChavePix() {
       navigator.clipboard.writeText(rawPixPayload);
       const btn = document.getElementById("btn-copy-label");
-      btn.textContent = "Copiado!";
-      setTimeout(() => { btn.textContent = "Copiar"; }, 2000);
+      if (btn) {
+        btn.textContent = "Copiado!";
+        setTimeout(() => { btn.textContent = "Copiar"; }, 2000);
+      }
     }
 
     function abrirCinema(id) {
@@ -1191,13 +1236,18 @@
       document.getElementById("cinema-price").textContent = formatCurrency(precoBase);
       
       const player = document.getElementById("cinema-player");
-      player.src = vid.preview_url;
-      player.play().catch(() => {});
+      if (player) {
+        player.src = vid.preview_url;
+        player.play().catch(() => {});
+      }
 
-      document.getElementById("cinema-buy-btn").onclick = () => {
-        fecharModais();
-        abrirCheckout(vid.id);
-      };
+      const cinemaBuyBtn = document.getElementById("cinema-buy-btn");
+      if (cinemaBuyBtn) {
+        cinemaBuyBtn.onclick = () => {
+          fecharModais();
+          abrirCheckout(vid.id);
+        };
+      }
 
       document.getElementById("cinema-modal").classList.add("open");
     }
@@ -1222,7 +1272,8 @@
     }
 
     setInterval(() => {
-      document.getElementById("clock-display").textContent = new Date().toLocaleTimeString('pt-BR');
+      const clk = document.getElementById("clock-display");
+      if (clk) clk.textContent = new Date().toLocaleTimeString('pt-BR');
     }, 1000);
 
     fetchConfig().finally(() => {

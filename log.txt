@@ -1,1 +1,5 @@
 [2026-09-14 19:08:15] Erro save_replay: [Errno 8] Erro no formato exec: '/home/gabriel/Área de trabalho/PLANETA BOLA/ffmpeg.exe'
+[2026-09-14 19:11:04] Erro save_replay: [Errno 8] Erro no formato exec: '/home/gabriel/Área de trabalho/PLANETA BOLA/ffmpeg.exe'
+[2026-09-14 19:11:12] Erro save_replay: [Errno 8] Erro no formato exec: '/home/gabriel/Área de trabalho/PLANETA BOLA/ffmpeg.exe'
+[2026-09-14 19:13:01] Erro save_replay: [Errno 8] Erro no formato exec: '/home/gabriel/Área de trabalho/PLANETA BOLA/ffmpeg.exe'
+[2026-09-14 19:13:15] Erro save_replay: [Errno 2] Arquivo ou diretório inexistente: 'ffmpeg'

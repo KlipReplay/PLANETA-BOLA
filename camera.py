@@ -33,9 +33,13 @@ os.makedirs(GRAVACOES_DIR, exist_ok=True)
 os.makedirs(REPLAYS_DIR, exist_ok=True)
 os.makedirs(PREVIEWS_DIR, exist_ok=True)
 
-# Busca FFmpeg local ou nas variáveis de ambiente do sistema
-FFMPEG_BIN = os.path.join(BASE_DIR, "ffmpeg.exe")
-if not os.path.exists(FFMPEG_BIN):
+
+# Suporte inteligente para Linux e Windows:
+if sys.platform == "win32":
+    FFMPEG_BIN = os.path.join(BASE_DIR, "ffmpeg.exe")
+    if not os.path.exists(FFMPEG_BIN):
+        FFMPEG_BIN = shutil.which("ffmpeg") or "ffmpeg"
+else:
     FFMPEG_BIN = shutil.which("ffmpeg") or "ffmpeg"
 
 LOG_FILE       = os.path.join(BASE_DIR, "log.txt")

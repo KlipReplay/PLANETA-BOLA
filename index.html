@@ -211,42 +211,40 @@
       }
     }
 
-    .court-btn {
+    .count-indicator-box {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: #131823;
+      border: 1px solid #212b3d;
       border-radius: 10px;
       padding: 8px 16px;
       font-size: 12px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: all 0.2s;
-      background: #131823;
       color: #cbd5e1;
-      border: 1px solid #212b3d;
-    }
-    .court-btn:hover { background: #192233; color: white; }
-    .court-btn.active {
-      background: #00e676;
-      color: #08090d;
-      font-weight: 800;
-      border-color: #00e676;
-      box-shadow: 0 4px 12px rgba(0, 230, 118, 0.25);
+      font-weight: 600;
     }
 
-    .time-window-group {
-      display: flex;
+  .time-window-group {
+      display: inline-flex;
       align-items: center;
       background: #131823;
       border: 1px solid #212b3d;
       border-radius: 10px;
-      padding: 2px;
+      padding: 3px;
+      height: 38px;
     }
     .time-btn {
-      padding: 6px 12px;
+      height: 100%;
+      padding: 0 12px;
       border-radius: 8px;
       font-size: 12px;
       background: transparent;
       border: none;
       color: #94a3b8;
       cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
       transition: all 0.2s;
     }
     .time-btn.active {
@@ -258,28 +256,37 @@
     .search-input-wrap {
       position: relative;
       min-width: 220px;
+      height: 38px;
+      display: flex;
+      align-items: center;
     }
-    .search-input-wrap i {
+    .search-input-wrap i,
+    .search-input-wrap svg {
       position: absolute;
       left: 12px;
-      top: 50%;
-      transform: translateY(-50%);
-      width: 14px;
-      height: 14px;
+      width: 15px;
+      height: 15px;
       color: #64748b;
+      pointer-events: none;
+      display: block;
     }
     .search-input {
       width: 100%;
+      height: 38px;
       border-radius: 10px;
       background: #131823;
       border: 1px solid #212b3d;
-      padding: 8px 12px 8px 36px;
+      padding: 0 12px 0 36px;
       font-size: 12px;
       color: #e8eaf2;
       outline: none;
       transition: border-color 0.2s;
+      display: flex;
+      align-items: center;
     }
-    .search-input:focus { border-color: #00e676; }
+    .search-input:focus { 
+      border-color: #00e676; 
+    }
 
     .replays-grid {
       display: grid;
@@ -582,9 +589,9 @@
       <div>
         <div class="tag-cameras">
           <i data-lucide="flame" style="width: 14px; height: 14px;"></i>
-          <span>Transmissão das Câmeras</span>
+          <span>Transmissão da Câmera</span>
           <span style="color: #64748b">•</span>
-          <span style="color: #94a3b8; font-weight: 500;">Armazenamento rotativo 90 min</span>
+          <span style="color: #94a3b8; font-weight: 500;">Armazenamento rotativo 48h</span>
         </div>
         <h1 class="font-bebas" style="font-size: 40px; letter-spacing: 1px; margin-top: 6px;">REPLAYS DA SUA PARTIDA</h1>
         <p style="font-size: 13px; color: #94a3b8; max-width: 620px; line-height: 1.5;">
@@ -602,16 +609,19 @@
     </div>
 
     <div class="filter-row">
-      <div id="courts-filter-bar" style="display: flex; flex-wrap: wrap; gap: 8px;">
-        <button class="court-btn active" onclick="filtrarQuadra('all', this)">Todas as Quadras (<span id="total-count">0</span>)</button>
-        <button class="court-btn" onclick="filtrarQuadra('Quadra 1', this)">Quadra 1</button>
+      <!-- Indicador unificado de lances disponíveis (sem separação por quadra) -->
+      <div class="count-indicator-box">
+        <i data-lucide="play-circle" style="width: 16px; height: 16px; color: #00e676;"></i>
+        <span>Lances disponíveis: <strong id="total-count" style="color: white;">0</strong></span>
       </div>
 
       <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+        <!-- Filtros de tempo com 30min ativo por padrão e adição de 48h (2880min) -->
         <div class="time-window-group">
-          <button class="time-btn" onclick="filtrarJanela(30, this)">30 min</button>
+          <button class="time-btn active" onclick="filtrarJanela(30, this)">30 min</button>
           <button class="time-btn" onclick="filtrarJanela(60, this)">60 min</button>
-          <button class="time-btn active" onclick="filtrarJanela(90, this)">90 min</button>
+          <button class="time-btn" onclick="filtrarJanela(90, this)">90 min</button>
+          <button class="time-btn" onclick="filtrarJanela(2880, this)">48h</button>
         </div>
 
         <div class="search-input-wrap">
@@ -652,7 +662,7 @@
           </div>
           <div>
             <div style="display: flex; align-items: center; gap: 6px;">
-              <span class="badge-quadra">Quadra 1</span>
+              <span class="badge-quadra">Lance da Quadra</span>
               <span class="font-mono" id="checkout-time-tag" style="font-size: 11px; color: #cbd5e1;">--:--:--</span>
             </div>
             <p id="checkout-highlight-text" style="font-size: 12px; font-weight: 600; color: white; margin-top: 4px;">Lance gravado na quadra</p>
@@ -743,7 +753,7 @@
     <div class="modal-card" style="max-width: 860px; padding: 20px;">
       <div style="display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #1f2a3e; padding-bottom: 12px;">
         <div style="display: flex; align-items: center; gap: 8px;">
-          <span class="badge-quadra">Quadra 1</span>
+          <span class="badge-quadra">Lance da Quadra</span>
           <span class="font-bebas" id="cinema-title" style="font-size: 22px;">REPLAY</span>
         </div>
         <button class="btn-close-modal" style="position: static;" onclick="fecharModais()">
@@ -795,13 +805,12 @@
         </div>
       </div>
       <div style="text-align: center; font-size: 10px; border-top: 1px solid #151c2a; padding-top: 14px; color: #475569;">
-        Os lances são gravados pelos sensores de impacto e botões de quadra, permanecendo disponíveis para download por até 90 minutos após a jogada.
+        Os lances são gravados pelos sensores e ficam disponíveis para download conforme a janela de tempo selecionada.
       </div>
     </div>
   </footer>
 
   <script>
-    // Se estiver rodando local no navegador, aponta para 127.0.0.1:5000; caso contrário, use a URL do túnel
     const BACKEND_URL = (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1" || window.location.protocol === "file:")
       ? "http://127.0.0.1:5000"
       : "https://nvidia-schema-drainage-framed.trycloudflare.com";
@@ -809,8 +818,7 @@
     let precoBase = 0.15;
     let replays = [];
     let isOnline = false;
-    let selectedCourt = 'all';
-    let timeFilterMinutes = 90;
+    let timeFilterMinutes = 30; // PADRÃO EM 30 MINUTOS
     let selectedVideo = null;
     let appliedCoupon = null;
     let pixPollingInterval = null;
@@ -837,7 +845,9 @@
         if (min < 1) return "Agora mesmo";
         if (min === 1) return "Há 1 minuto";
         if (min < 60) return `Há ${min} min`;
-        return `Há ${Math.floor(min / 60)}h ${min % 60}m`;
+        const h = Math.floor(min / 60);
+        if (h < 24) return `Há ${h}h ${min % 60}m`;
+        return `Há ${Math.floor(h / 24)}d ${h % 24}h`;
       } catch { return "Recente"; }
     }
 
@@ -859,19 +869,35 @@
       const icon = document.getElementById("refresh-icon");
       if (icon) icon.classList.add("animate-spin");
       try {
-        const res = await fetch(`${BACKEND_URL}/replays`, { signal: AbortSignal.timeout(4500) });
+        // Envia timestamp para quebrar cache de forma consistente
+        const res = await fetch(`${BACKEND_URL}/replays?_=${Date.now()}`, { 
+          signal: AbortSignal.timeout(4500),
+          headers: { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' }
+        });
+        
         if (res.ok) {
           const data = await res.json();
           if (Array.isArray(data)) {
-            replays = data.map((v, i) => ({
+            let lista = data.map((v, i) => ({
               id: v.id || `video-${i}`,
               nome: v.nome || `lance_${i}`,
               criado_em: v.criado_em || new Date().toISOString(),
               preview_url: v.preview_url || '',
-              court: 'Quadra 1',
               duration: 20,
               highlightType: 'Lance gravado na quadra'
             }));
+
+            // ORDENAÇÃO: O mais recente no topo, os mais antigos para baixo
+            lista.sort((a, b) => {
+              const timeA = new Date(a.criado_em).getTime();
+              const timeB = new Date(b.criado_em).getTime();
+              if (!isNaN(timeA) && !isNaN(timeB) && timeA !== timeB) {
+                return timeB - timeA;
+              }
+              return Number(b.id) - Number(a.id);
+            });
+
+            replays = lista;
             isOnline = true;
           }
         } else {
@@ -884,7 +910,6 @@
       } finally {
         if (icon) icon.classList.remove("animate-spin");
         atualizarStatusIndicador();
-        atualizarAbasQuadras();
         renderizarCards();
       }
     }
@@ -902,28 +927,9 @@
       }
     }
 
-    function atualizarAbasQuadras() {
-      const container = document.getElementById("courts-filter-bar");
-      const totalCount = document.getElementById("total-count");
-      
-      if (totalCount) {
-        totalCount.textContent = replays.length;
-      }
-      
-      if (container) {
-        container.innerHTML = `
-          <button class="court-btn ${selectedCourt === 'all' ? 'active' : ''}" onclick="filtrarQuadra('all', this)">
-            Todas as Quadras (<span id="total-count">${replays.length}</span>)
-          </button>
-          <button class="court-btn ${selectedCourt === 'Quadra 1' ? 'active' : ''}" onclick="filtrarQuadra('Quadra 1', this)">
-            Quadra 1
-          </button>
-        `;
-      }
-    }
-
     function renderizarCards() {
       const grid = document.getElementById("replays-container");
+      const totalCount = document.getElementById("total-count");
       if (!grid) return;
 
       const searchInput = document.getElementById("search-box");
@@ -934,7 +940,6 @@
       const filtrados = replays.filter(v => {
         const vTime = new Date(v.criado_em).getTime();
         if (!isNaN(vTime) && now - vTime > maxAgeMs) return false;
-        if (selectedCourt !== 'all' && v.court !== selectedCourt) return false;
         if (query) {
           const matchName = (v.nome || "").toLowerCase().includes(query);
           if (!matchName) return false;
@@ -942,12 +947,16 @@
         return true;
       });
 
+      if (totalCount) {
+        totalCount.textContent = filtrados.length;
+      }
+
       if (filtrados.length === 0) {
         grid.innerHTML = `
           <div style="grid-column: 1 / -1; text-align: center; padding: 60px 0; color: #64748b;">
             <i data-lucide="video-off" style="width: 42px; height: 42px; margin: 0 auto 12px auto; opacity: 0.5;"></i>
             <h3 class="font-bebas" style="font-size: 26px; color: white;">Nenhum replay no momento</h3>
-            <p style="font-size: 12px;">Não há lances gravados com os filtros atuais nos últimos ${timeFilterMinutes} minutos.</p>
+            <p style="font-size: 12px;">Não há lances gravados no filtro de ${timeFilterMinutes >= 1440 ? (timeFilterMinutes/1440) + 'h' : timeFilterMinutes + ' min'}.</p>
           </div>
         `;
         if (window.lucide) lucide.createIcons();
@@ -964,7 +973,7 @@
           <div class="thumb-holder" onclick="abrirCinema('${video.id}')">
             <div class="scrub-progress"><div class="scrub-bar" id="scrub-${video.id}"></div></div>
             <div class="card-badges-top">
-              <span class="badge-quadra">${video.court}</span>
+              <span class="badge-quadra">Quadra Principal</span>
               <span class="badge-fps">HD 60FPS</span>
             </div>
             <video src="${video.preview_url}" muted playsinline preload="metadata" id="vid-${video.id}"></video>
@@ -1026,13 +1035,6 @@
         grid.appendChild(card);
       });
       if (window.lucide) lucide.createIcons();
-    }
-
-    function filtrarQuadra(court, btn) {
-      selectedCourt = court;
-      document.querySelectorAll(".court-btn").forEach(b => b.classList.remove("active"));
-      if (btn) btn.classList.add("active");
-      renderizarCards();
     }
 
     function filtrarJanela(min, btn) {

@@ -1,4 +1,7 @@
 {
   "preco_replay": 0.3,
-  "duracao_replay_segundos": 20
+  "duracao_buffer_segundos": 60,
+  "tempo_pre_clique_segundos": 20,
+  "tempo_pos_clique_segundos": 0,
+  "duracao_preview_segundos": 5
 }

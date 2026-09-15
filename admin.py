@@ -2,9 +2,10 @@ import os
 import sys
 import subprocess
 import json
+import time
 from datetime import datetime
 import cv2
-from flask import Flask, jsonify, request, render_template_string
+from flask import Flask, jsonify, request, render_template_string, Response
 from flask_cors import CORS
 from dotenv import load_dotenv
 from supabase import create_client
@@ -46,7 +47,13 @@ processos = {
 }
 
 def carregar_config_local():
-    padrao = {"preco_replay": 0.15, "duracao_replay_segundos": 60}
+    padrao = {
+        "preco_replay": 0.15,
+        "duracao_buffer_segundos": 60,
+        "tempo_pre_clique_segundos": 20,
+        "tempo_pos_clique_segundos": 5,
+        "duracao_preview_segundos": 5
+    }
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -159,6 +166,9 @@ def status_processo(proc):
         return "ONLINE"
     return "STOPPED"
 
+# ============================================================
+# ROTAS DA API
+# ============================================================
 @app.route("/")
 def painel():
     return render_template_string(HTML_DASHBOARD)
@@ -254,20 +264,32 @@ def post_configuracoes():
     dados = request.get_json(silent=True) or {}
     try:
         preco = float(dados.get("preco_replay", 0.15))
-        duracao = int(dados.get("duracao_replay_segundos", 60))
+        buffer_total = int(dados.get("duracao_buffer_segundos", 60))
+        tempo_pre = int(dados.get("tempo_pre_clique_segundos", 20))
+        tempo_pos = int(dados.get("tempo_pos_clique_segundos", 5))
+        duracao_prev = int(dados.get("duracao_preview_segundos", 5))
 
         if preco < 0.10:
-            return jsonify({"erro": "O preço mínimo do replay é R$ 0,10"}), 400
-        if duracao < 10 or duracao > 300:
-            return jsonify({"erro": "A duração deve ficar entre 10 e 300 segundos"}), 400
+            return jsonify({"erro": "O preço mínimo é R$ 0,10"}), 400
+        if buffer_total < 30 or buffer_total > 600:
+            return jsonify({"erro": "O buffer na RAM/Disco deve ficar entre 30 e 600 segundos"}), 400
+        if tempo_pre < 5 or tempo_pre > buffer_total:
+            return jsonify({"erro": "O tempo pré-clique não pode exceder o buffer total"}), 400
+        if tempo_pos < 0 or tempo_pos > 60:
+            return jsonify({"erro": "O tempo pós-clique deve ficar entre 0 e 60 segundos"}), 400
+        if duracao_prev < 2 or duracao_prev > 15:
+            return jsonify({"erro": "A prévia deve ter entre 2 e 15 segundos"}), 400
 
         nova_config = {
             "preco_replay": round(preco, 2),
-            "duracao_replay_segundos": duracao
+            "duracao_buffer_segundos": buffer_total,
+            "tempo_pre_clique_segundos": tempo_pre,
+            "tempo_pos_clique_segundos": tempo_pos,
+            "duracao_preview_segundos": duracao_prev
         }
 
         if salvar_config_local(nova_config):
-            return jsonify({"mensagem": "Configurações salvas com sucesso!", "config": nova_config}), 200
+            return jsonify({"mensagem": "Configurações salvas!", "config": nova_config}), 200
         return jsonify({"erro": "Falha ao gravar arquivo config.json"}), 500
 
     except (ValueError, TypeError) as e:
@@ -364,221 +386,467 @@ def parar_servico(servico):
     processos[servico] = None
     return jsonify({"mensagem": f"{servico} já estava parado", "status": "OFFLINE"})
 
+# ============================================================
+# STREAMING DE TESTE DA CÂMERA SOB DEMANDA (SEM JANELA FIXA)
+# ============================================================
+def gerar_frames_preview(cam_idx):
+    backend = cv2.CAP_MSMF if sys.platform == "win32" else cv2.CAP_ANY
+    cap = cv2.VideoCapture(int(cam_idx), backend)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    
+    try:
+        while True:
+            sucesso, frame = cap.read()
+            if not sucesso:
+                break
+            # Insere data/hora no frame de teste
+            texto = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+            cv2.putText(frame, texto, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 230, 118), 2)
+            
+            _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+            time.sleep(0.04) # ~25 FPS
+    finally:
+        cap.release()
+
+@app.route("/video_feed")
+def video_feed():
+    cam_idx = request.args.get("index", "0")
+    return Response(gerar_frames_preview(cam_idx),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+
+
 HTML_DASHBOARD = """
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Admin - Gestão Replay</title>
+<title>Admin - Central de Controle Arena</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lucide@latest"></script>
 <style>
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0b0f19; color: #f1f5f9; margin: 0; padding: 28px 20px; }
-  .container { max-width: 960px; margin: 0 auto; }
-  .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 22px; }
-  h1 { font-size: 22px; font-weight: 700; margin: 0; }
-  
-  .tabs { display: flex; gap: 8px; border-bottom: 1px solid #1e293b; margin-bottom: 20px; }
-  .tab-btn { background: none; border: none; color: #94a3b8; padding: 10px 18px; font-size: 14px; font-weight: 600; cursor: pointer; border-bottom: 2px solid transparent; transition: all .2s; }
-  .tab-btn:hover { color: #f1f5f9; }
-  .tab-btn.active { color: #38bdf8; border-bottom-color: #38bdf8; }
+  :root {
+    --bg-main: #090c14;
+    --bg-card: #0f1523;
+    --bg-inner: #151d30;
+    --border: #1e293f;
+    --accent: #00e676;
+    --accent-blue: #38bdf8;
+    --danger: #ef4444;
+    --warning: #facc15;
+    --text-primary: #f8fafc;
+    --text-secondary: #94a3b8;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: var(--bg-main);
+    color: var(--text-primary);
+    padding: 30px 20px;
+  }
+  .font-mono { font-family: 'Space Grotesk', monospace; }
+  .container { max-width: 1040px; margin: 0 auto; }
+
+  /* HEADER */
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 20px;
+    margin-bottom: 24px;
+  }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .brand-logo {
+    width: 42px;
+    height: 42px;
+    background: linear-gradient(135deg, #182338, #0f172a);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--accent);
+  }
+  .brand-title { font-size: 20px; font-weight: 800; letter-spacing: 0.5px; }
+  .brand-sub { font-size: 12px; color: var(--text-secondary); }
+
+  /* TABS */
+  .tabs { display: flex; gap: 10px; margin-bottom: 24px; }
+  .tab-btn {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    padding: 10px 18px;
+    border-radius: 10px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    transition: all .2s;
+  }
+  .tab-btn:hover { color: #fff; border-color: #334155; }
+  .tab-btn.active {
+    background: rgba(0, 230, 118, 0.1);
+    color: var(--accent);
+    border-color: rgba(0, 230, 118, 0.4);
+    box-shadow: 0 4px 12px rgba(0, 230, 118, 0.15);
+  }
   .tab-content { display: none; }
   .tab-content.active { display: block; }
 
-  .section-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px; color: #94a3b8; font-weight: 700; margin: 20px 0 10px 0; }
-  .grid-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
-  .card-metric { background: #131b2e; border-radius: 10px; padding: 16px; border: 1px solid #1e293b; display: flex; flex-direction: column; justify-content: space-between; }
-  .card-metric h4 { margin: 0 0 6px 0; color: #94a3b8; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
-  .metric-val { font-size: 20px; font-weight: 700; color: #38bdf8; }
+  /* CARDS & GRIDS */
+  .section-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-secondary);
+    font-weight: 800;
+    margin: 24px 0 12px 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .grid-metrics {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 14px;
+    margin-bottom: 20px;
+  }
+  .card-metric {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 18px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+  .card-metric h4 {
+    font-size: 12px;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
+  }
+  .metric-val { font-size: 24px; font-weight: 800; }
   .metric-sub { font-size: 12px; color: #64748b; margin-top: 4px; }
-  
-  .split-box { margin-top: 10px; border-top: 1px solid #1e293b; padding-top: 8px; font-size: 11px; display: flex; flex-direction: column; gap: 4px; }
+
+  .split-box {
+    margin-top: 12px;
+    border-top: 1px solid var(--border);
+    padding-top: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+  }
   .split-row { display: flex; justify-content: space-between; align-items: center; }
 
-  .card { background: #131b2e; border-radius: 10px; padding: 18px; margin-bottom: 16px; border: 1px solid #1e293b; }
-  .card-title { font-size: 15px; font-weight: 600; margin-bottom: 14px; display: flex; justify-content: space-between; align-items: center; }
-  .status-badge { font-size: 11px; padding: 3px 9px; border-radius: 9999px; font-weight: 700; }
-  .status-online { background: #064e3b; color: #34d399; }
-  .status-offline { background: #7f1d1d; color: #f87171; }
-  
-  .btn { padding: 8px 14px; border-radius: 6px; border: none; font-weight: 600; font-size: 12px; cursor: pointer; transition: opacity .15s; }
-  .btn:hover { opacity: .88; }
-  .btn-start { background: #10b981; color: #022c22; }
-  .btn-stop { background: #ef4444; color: white; }
-  .btn-refresh { background: #1e293b; color: #94a3b8; border: 1px solid #334155; }
-  .btn-save { background: #38bdf8; color: #082f49; font-weight: 700; }
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+  .card-title {
+    font-size: 15px;
+    font-weight: 700;
+    margin-bottom: 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
 
-  input, select { background: #090d16; border: 1px solid #334155; color: #f8fafc; padding: 9px 12px; border-radius: 6px; font-size: 13px; outline: none; }
-  select { width: 100%; margin-bottom: 12px; }
-  .progress-bg { width: 100%; height: 7px; background: #1e293b; border-radius: 4px; overflow: hidden; margin-top: 8px; }
-  .progress-bar { height: 100%; background: #3b82f6; width: 0%; transition: width .3s; }
+  /* BOTÕES E CONTROLES */
+  .btn {
+    padding: 9px 16px;
+    border-radius: 10px;
+    border: none;
+    font-weight: 700;
+    font-size: 12px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    transition: all .2s;
+  }
+  .btn:hover { opacity: .9; transform: translateY(-1px); }
+  .btn-start { background: var(--accent); color: #08090d; }
+  .btn-stop { background: var(--danger); color: white; }
+  .btn-blue { background: var(--accent-blue); color: #082f49; }
+  .btn-outline { background: var(--bg-inner); color: var(--text-secondary); border: 1px solid var(--border); }
+  .btn-outline:hover { color: #fff; border-color: #475569; }
 
-  .cupom-form { display: flex; gap: 10px; margin-bottom: 18px; flex-wrap: wrap; }
-  .cupom-table { width: 100%; border-collapse: collapse; font-size: 13px; text-align: left; }
-  .cupom-table th { padding: 10px; border-bottom: 1px solid #1e293b; color: #94a3b8; font-weight: 600; }
-  .cupom-table td { padding: 12px 10px; border-bottom: 1px solid #1e293b; vertical-align: middle; }
-  .tag-code { font-family: monospace; font-size: 13px; background: #1e293b; color: #38bdf8; padding: 4px 8px; border-radius: 4px; font-weight: bold; }
+  .status-badge {
+    font-size: 10px;
+    padding: 4px 10px;
+    border-radius: 9999px;
+    font-weight: 800;
+    letter-spacing: 0.5px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .status-online { background: rgba(0, 230, 118, 0.15); color: var(--accent); border: 1px solid rgba(0, 230, 118, 0.3); }
+  .status-offline { background: rgba(239, 68, 68, 0.15); color: var(--danger); border: 1px solid rgba(239, 68, 68, 0.3); }
+  .dot-pulse { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 
-  .config-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
-  .config-item label { display: block; font-size: 12px; color: #94a3b8; font-weight: 600; margin-bottom: 6px; }
-  .config-item small { display: block; font-size: 11px; color: #64748b; margin-top: 4px; }
-  .alert-box { padding: 10px 14px; border-radius: 6px; font-size: 12px; margin-top: 12px; display: none; }
+  input, select {
+    background: var(--bg-inner);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    padding: 10px 14px;
+    border-radius: 10px;
+    font-size: 13px;
+    outline: none;
+    transition: border-color .2s;
+  }
+  input:focus, select:focus { border-color: var(--accent); }
+  select { width: 100%; margin-bottom: 14px; }
+
+  /* FORMULÁRIO DE TEMPOS DO REPLAY */
+  .config-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+    margin-bottom: 20px;
+  }
+  .config-item { display: flex; flex-direction: column; gap: 6px; }
+  .config-item label { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
+  .config-item small { font-size: 11px; color: #64748b; line-height: 1.4; }
+
+  /* TABELA CUPONS */
+  .cupom-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; }
+  .cupom-table th { padding: 12px; border-bottom: 1px solid var(--border); color: var(--text-secondary); font-weight: 700; text-align: left; }
+  .cupom-table td { padding: 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  .tag-code { font-family: 'Space Grotesk', monospace; font-size: 12px; background: var(--bg-inner); border: 1px solid var(--border); color: var(--accent-blue); padding: 4px 8px; border-radius: 6px; font-weight: 700; }
+
+  /* MODAL PREVIEW CÂMERA */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 999;
+    background: rgba(0, 0, 0, 0.88);
+    backdrop-filter: blur(8px);
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal-box {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    max-width: 800px;
+    width: 100%;
+    overflow: hidden;
+    position: relative;
+    box-shadow: 0 25px 50px rgba(0,0,0,0.8);
+  }
+  .modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+  }
+  .modal-feed {
+    width: 100%;
+    aspect-ratio: 16/9;
+    background: #000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .modal-feed img { width: 100%; height: 100%; object-fit: contain; }
+
+  .progress-bg { width: 100%; height: 8px; background: var(--bg-inner); border-radius: 9999px; overflow: hidden; margin-top: 10px; }
+  .progress-bar { height: 100%; background: var(--accent-blue); width: 0%; transition: width .3s; }
+  .alert-box { padding: 12px 16px; border-radius: 10px; font-size: 12px; margin-top: 14px; display: none; }
 </style>
 </head>
 <body>
+
 <div class="container">
+  <!-- HEADER -->
   <div class="header">
-    <h1>Painel de Controle - Quadra Replay</h1>
-    <button class="btn btn-refresh" onclick="carregarTudo()">Atualizar Dados</button>
+    <div class="brand">
+      <div class="brand-logo"><i data-lucide="video"></i></div>
+      <div>
+        <div class="brand-title">KLIP REPLAY <span style="color: var(--accent); font-size: 14px;">ADMIN</span></div>
+        <div class="brand-sub">Gerenciador de Processos, Tempos e Faturamento</div>
+      </div>
+    </div>
+    <button class="btn btn-outline" onclick="carregarTudo()">
+      <i data-lucide="refresh-cw" id="btn-sync-icon"></i> Sincronizar
+    </button>
   </div>
 
+  <!-- TABS -->
   <div class="tabs">
-    <button class="tab-btn active" onclick="trocarAba('visao-geral')">Visão Geral & Sistema</button>
-    <button class="tab-btn" onclick="trocarAba('cupons')">Cupons de Desconto</button>
-    <button class="tab-btn" onclick="trocarAba('configuracoes')">Configurações</button>
+    <button class="tab-btn active" onclick="trocarAba('visao-geral')"><i data-lucide="activity"></i> Operação & Sistema</button>
+    <button class="tab-btn" onclick="trocarAba('tempos')"><i data-lucide="clock"></i> Tempos & Replay</button>
+    <button class="tab-btn" onclick="trocarAba('cupons')"><i data-lucide="tag"></i> Cupons Promocionais</button>
   </div>
 
-  <!-- ABA 1: VISÃO GERAL -->
+  <!-- ABA 1: OPERAÇÃO E DISPOSITIVOS -->
   <div id="tab-visao-geral" class="tab-content active">
-    <div class="section-label">Controle Financeiro & Repasse (70% / 30%)</div>
+    <div class="section-label"><i data-lucide="dollar-sign"></i> Faturamento & Repasse (70% Sistema / 30% Quadra)</div>
     <div class="grid-metrics">
       <div class="card-metric">
         <div>
           <h4>Hoje</h4>
-          <div id="fin-hoje-total" class="metric-val" style="color: #4ade80;">R$ 0,00</div>
+          <div id="fin-hoje-total" class="metric-val" style="color: var(--accent);">R$ 0,00</div>
           <div id="fin-hoje-qtd" class="metric-sub">0 replays vendidos</div>
         </div>
         <div class="split-box">
-          <div class="split-row">
-            <span style="color: #94a3b8;">70% (Sistema):</span>
-            <strong id="fin-hoje-70" style="color: #38bdf8;">R$ 0,00</strong>
-          </div>
-          <div class="split-row">
-            <span style="color: #94a3b8;">30% (Quadra):</span>
-            <strong id="fin-hoje-30" style="color: #facc15;">R$ 0,00</strong>
-          </div>
+          <div class="split-row"><span>70% Sistema:</span><strong id="fin-hoje-70" style="color: var(--accent-blue);">R$ 0,00</strong></div>
+          <div class="split-row"><span>30% Quadra:</span><strong id="fin-hoje-30" style="color: var(--warning);">R$ 0,00</strong></div>
         </div>
       </div>
 
       <div class="card-metric">
         <div>
           <h4>Mês Atual</h4>
-          <div id="fin-mes-total" class="metric-val" style="color: #4ade80;">R$ 0,00</div>
+          <div id="fin-mes-total" class="metric-val" style="color: var(--accent);">R$ 0,00</div>
           <div id="fin-mes-qtd" class="metric-sub">0 replays vendidos</div>
         </div>
         <div class="split-box">
-          <div class="split-row">
-            <span style="color: #94a3b8;">70% (Sistema):</span>
-            <strong id="fin-mes-70" style="color: #38bdf8;">R$ 0,00</strong>
-          </div>
-          <div class="split-row">
-            <span style="color: #94a3b8;">30% (Quadra):</span>
-            <strong id="fin-mes-30" style="color: #facc15;">R$ 0,00</strong>
-          </div>
+          <div class="split-row"><span>70% Sistema:</span><strong id="fin-mes-70" style="color: var(--accent-blue);">R$ 0,00</strong></div>
+          <div class="split-row"><span>30% Quadra:</span><strong id="fin-mes-30" style="color: var(--warning);">R$ 0,00</strong></div>
         </div>
       </div>
 
       <div class="card-metric">
         <div>
           <h4>Total Acumulado</h4>
-          <div id="fin-geral-total" class="metric-val" style="color: #22d3ee;">R$ 0,00</div>
+          <div id="fin-geral-total" class="metric-val" style="color: #38bdf8;">R$ 0,00</div>
           <div id="fin-geral-qtd" class="metric-sub">0 vendas aprovadas</div>
         </div>
         <div class="split-box">
-          <div class="split-row">
-            <span style="color: #94a3b8;">70% (Sistema):</span>
-            <strong id="fin-geral-70" style="color: #38bdf8;">R$ 0,00</strong>
-          </div>
-          <div class="split-row">
-            <span style="color: #94a3b8;">30% (Quadra):</span>
-            <strong id="fin-geral-30" style="color: #facc15;">R$ 0,00</strong>
-          </div>
+          <div class="split-row"><span>70% Sistema:</span><strong id="fin-geral-70" style="color: var(--accent-blue);">R$ 0,00</strong></div>
+          <div class="split-row"><span>30% Quadra:</span><strong id="fin-geral-30" style="color: var(--warning);">R$ 0,00</strong></div>
         </div>
       </div>
 
       <div class="card-metric">
         <div>
-          <h4>Bandwidth Usado</h4>
-          <div id="m-bw-total" class="metric-val" style="color: #e2e8f0;">0 B</div>
-          <div class="metric-sub">Tráfego de upload local</div>
+          <h4>Supabase Storage</h4>
+          <div id="m-supa-tam" class="metric-val" style="color: #cbd5e1;">0 MB</div>
+          <div id="m-supa-sub" class="metric-sub">0 arquivos (0%)</div>
         </div>
+        <div class="progress-bg"><div id="m-supa-bar" class="progress-bar"></div></div>
       </div>
     </div>
 
-    <div class="section-label">Armazenamento & Mídia</div>
-    <div class="grid-metrics" style="margin-bottom: 20px;">
-      <div class="card-metric">
-        <h4>Gravações Contínuas</h4>
-        <div id="m-grav-qtd" class="metric-val">0</div>
-        <div id="m-grav-tam" class="metric-sub">0 B em disco</div>
-      </div>
-      <div class="card-metric">
-        <h4>Replays Cortados</h4>
-        <div id="m-rep-qtd" class="metric-val">0</div>
-        <div id="m-rep-tam" class="metric-sub">0 B em disco</div>
-      </div>
-      <div class="card-metric">
-        <h4>Previews Locais</h4>
-        <div id="m-prev-qtd" class="metric-val">0</div>
-        <div id="m-prev-tam" class="metric-sub">0 B em disco</div>
-      </div>
-      <div class="card-metric">
-        <h4>Supabase Storage</h4>
-        <div id="m-supa-tam" class="metric-val">0 MB</div>
-        <div id="m-supa-sub" class="metric-sub">0 arquivos (0%)</div>
-        <div class="progress-bg">
-          <div id="m-supa-bar" class="progress-bar"></div>
-        </div>
-      </div>
-    </div>
-
-    <div class="section-label">Gerenciamento de Processos</div>
+    <div class="section-label"><i data-lucide="cpu"></i> Gerenciamento de Serviços</div>
     <div class="card">
       <div class="card-title">
-        <span>Servidor de Pagamento e API (server.py)</span>
-        <span id="badge-server" class="status-badge status-offline">OFFLINE</span>
+        <span>Servidor de Pagamento Pix & API (server.py)</span>
+        <span id="badge-server" class="status-badge status-offline"><span class="dot-pulse"></span>OFFLINE</span>
       </div>
-      <button class="btn btn-start" onclick="iniciar('server')" style="margin-right: 6px;">Iniciar Servidor</button>
-      <button class="btn btn-stop" onclick="parar('server')">Parar Servidor</button>
+      <div style="display: flex; gap: 8px;">
+        <button class="btn btn-start" onclick="iniciar('server')"><i data-lucide="play"></i> Iniciar Servidor</button>
+        <button class="btn btn-stop" onclick="parar('server')"><i data-lucide="square"></i> Parar Servidor</button>
+      </div>
     </div>
 
     <div class="card">
       <div class="card-title">
-        <span>Captura da Câmera e Gravação (camera.py)</span>
-        <span id="badge-camera" class="status-badge status-offline">OFFLINE</span>
+        <span>Captura da Câmera & Detecção de Lance (camera.py)</span>
+        <span id="badge-camera" class="status-badge status-offline"><span class="dot-pulse"></span>OFFLINE</span>
       </div>
-      <label style="font-size:12px; color:#94a3b8; display:block; margin-bottom:6px;">Dispositivo de Vídeo:</label>
+      <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:8px;">Dispositivo de Vídeo Conectado:</label>
       <select id="camera-select">
         <option value="0">Detectando câmeras...</option>
       </select>
-      <button class="btn btn-start" onclick="iniciarCamera()" style="margin-right: 6px;">Iniciar Câmera</button>
-      <button class="btn btn-stop" onclick="parar('camera')">Parar Câmera</button>
+      
+      <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+        <button class="btn btn-start" onclick="iniciarCamera()"><i data-lucide="play"></i> Iniciar Gravação Câmera</button>
+        <button class="btn btn-stop" onclick="parar('camera')"><i data-lucide="square"></i> Parar Câmera</button>
+        <!-- BOTÃO DE VISUALIZAÇÃO SOB DEMANDA (SEM JANELA FIXA) -->
+        <button class="btn btn-blue" onclick="abrirPreviewCamera()"><i data-lucide="eye"></i> Visualizar Câmera (Preview)</button>
+      </div>
     </div>
   </div>
 
-  <!-- ABA 2: CUPONS -->
+  <!-- ABA 2: TEMPOS DO REPLAY E PREÇO -->
+  <div id="tab-tempos" class="tab-content">
+    <div class="card">
+      <div class="card-title">Ajustes de Buffer e Duração dos Lances</div>
+      
+      <div class="config-grid">
+        <div class="config-item">
+          <label>Buffer Total Mantido na Memória (segundos):</label>
+          <input type="number" id="cfg-buffer" min="30" max="300">
+          <small>Tamanho da fila circular contínua (ex: 60s). Define o limite máximo que a câmera guarda.</small>
+        </div>
+
+        <div class="config-item">
+          <label>Tempo Retroativo Pré-Clique (segundos):</label>
+          <input type="number" id="cfg-tempo-pre" min="5" max="120">
+          <small>Quantos segundos antes de pressionar o botão da quadra devem entrar no replay.</small>
+        </div>
+
+        <div class="config-item">
+          <label>Tempo de Gravação Pós-Clique (segundos):</label>
+          <input type="number" id="cfg-tempo-pos" min="0" max="30">
+          <small>Quantos segundos após o acionamento ainda serão gravados (para pegar a comemoração).</small>
+        </div>
+
+        <div class="config-item">
+          <label>Duração do Preview Web (segundos):</label>
+          <input type="number" id="cfg-preview" min="2" max="15">
+          <small>Duração do clipe rápido gratuito exibido no feed do site (padrão: 5s).</small>
+        </div>
+
+        <div class="config-item">
+          <label>Preço Padrão do Replay (R$):</label>
+          <input type="number" id="cfg-preco" step="0.01" min="0.10">
+          <small>Cobrança padrão na emissão do QR Code Pix (Mínimo: R$ 0,10).</small>
+        </div>
+      </div>
+
+      <button class="btn btn-start" onclick="salvarConfiguracoes()"><i data-lucide="check"></i> Salvar Parâmetros</button>
+      <div id="cfg-msg" class="alert-box"></div>
+    </div>
+  </div>
+
+  <!-- ABA 3: CUPONS -->
   <div id="tab-cupons" class="tab-content">
     <div class="card">
       <div class="card-title">Criar Novo Cupom Promocional</div>
-      <div class="cupom-form">
-        <input type="text" id="cupom-nome" placeholder="CÓDIGO (ex: AMIGOS10)" style="text-transform: uppercase; min-width: 200px;">
+      <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+        <input type="text" id="cupom-nome" placeholder="CÓDIGO (ex: FINAL10)" style="text-transform: uppercase; min-width: 180px;">
         <select id="cupom-tipo" style="width: auto; margin-bottom: 0;">
-          <option value="porcentagem">% Porcentagem de Desconto</option>
-          <option value="fixo">R$ Desconto Fixo em Reais</option>
+          <option value="porcentagem">% Porcentagem</option>
+          <option value="fixo">R$ Fixo</option>
         </select>
-        <input type="number" step="0.01" id="cupom-valor" placeholder="Valor (ex: 20 ou 2.50)" style="width: 170px;">
-        <button class="btn btn-start" onclick="adicionarCupom()">+ Adicionar Cupom</button>
+        <input type="number" step="0.01" id="cupom-valor" placeholder="Valor (ex: 20 ou 2.00)" style="width: 160px;">
+        <button class="btn btn-start" onclick="adicionarCupom()"><i data-lucide="plus"></i> Cadastrar Cupom</button>
       </div>
     </div>
 
     <div class="card">
-      <div class="card-title">Cupons Cadastrados no Sistema</div>
+      <div class="card-title">Cupons Cadastrados no Supabase</div>
       <table class="cupom-table">
         <thead>
           <tr>
             <th>Código</th>
             <th>Tipo</th>
             <th>Desconto</th>
-            <th>Uso Total</th>
+            <th>Usos</th>
             <th>Ação</th>
           </tr>
         </thead>
@@ -588,48 +856,44 @@ HTML_DASHBOARD = """
       </table>
     </div>
   </div>
+</div>
 
-  <!-- ABA 3: CONFIGURAÇÕES -->
-  <div id="tab-configuracoes" class="tab-content">
-    <div class="card">
-      <div class="card-title">Ajustes do Replay e Cobrança</div>
-      
-      <div class="config-grid">
-        <div class="config-item">
-          <label>Preço Padrão do Replay (R$):</label>
-          <input type="number" id="cfg-preco" step="0.01" min="0.10" style="width: 100%;">
-          <small>Valor cobrado por padrão ao gerar o Pix (Mínimo: R$ 0,10).</small>
-        </div>
-
-        <div class="config-item">
-          <label>Duração do Replay Cortado (Segundos):</label>
-          <input type="number" id="cfg-duracao" min="10" max="300" style="width: 100%;">
-          <small>Tempo retroativo salvo da jogada (ex: 20s, 60s ou 90s).</small>
-        </div>
+<!-- MODAL DE PREVIEW DA CÂMERA -->
+<div class="modal-overlay" id="camera-modal">
+  <div class="modal-box">
+    <div class="modal-header">
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <i data-lucide="camera" style="color: var(--accent); width: 18px; height: 18px;"></i>
+        <strong style="font-size: 14px;">Preview Ao Vivo do Dispositivo</strong>
       </div>
-
-      <button class="btn btn-save" onclick="salvarConfiguracoes()">Salvar Configurações</button>
-      <div id="cfg-msg" class="alert-box"></div>
+      <button class="btn btn-outline" style="padding: 4px 10px;" onclick="fecharPreviewCamera()">Fechar ✕</button>
+    </div>
+    <div class="modal-feed">
+      <img id="feed-img" src="" alt="Aguardando Feed da Câmera...">
+    </div>
+    <div style="padding: 12px 20px; font-size: 11px; color: var(--text-secondary); display: flex; justify-content: space-between;">
+      <span>💡 Use esta tela para ajustar foco e enquadramento da quadra.</span>
+      <span style="color: var(--accent);">Feed temporário sob demanda</span>
     </div>
   </div>
 </div>
 
 <script>
-function trocarAba(nomeAba) {
+function trocarAba(aba) {
   document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
   document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
   
-  if (nomeAba === 'visao-geral') {
+  if (aba === 'visao-geral') {
     document.querySelector("button[onclick*='visao-geral']").classList.add('active');
     document.getElementById('tab-visao-geral').classList.add('active');
-  } else if (nomeAba === 'cupons') {
+  } else if (aba === 'tempos') {
+    document.querySelector("button[onclick*='tempos']").classList.add('active');
+    document.getElementById('tab-tempos').classList.add('active');
+    carregarConfiguracoes();
+  } else if (aba === 'cupons') {
     document.querySelector("button[onclick*='cupons']").classList.add('active');
     document.getElementById('tab-cupons').classList.add('active');
     carregarCupons();
-  } else if (nomeAba === 'configuracoes') {
-    document.querySelector("button[onclick*='configuracoes']").classList.add('active');
-    document.getElementById('tab-configuracoes').classList.add('active');
-    carregarConfiguracoes();
   }
 }
 
@@ -639,14 +903,12 @@ async function atualizarStatus() {
     const data = await res.json();
     configurarBadge('server', data.server);
     configurarBadge('camera', data.camera);
-  } catch (e) {
-    console.error(e);
-  }
+  } catch (e) {}
 }
 
 function configurarBadge(servico, status) {
   const badge = document.getElementById(`badge-${servico}`);
-  badge.textContent = status;
+  badge.innerHTML = `<span class="dot-pulse"></span>${status}`;
   badge.className = `status-badge ${status === 'ONLINE' ? 'status-online' : 'status-offline'}`;
 }
 
@@ -654,26 +916,12 @@ async function atualizarMetricas() {
   try {
     const res = await fetch('/api/metricas');
     const d = await res.json();
-
-    document.getElementById('m-grav-qtd').textContent = d.gravacoes.qtd;
-    document.getElementById('m-grav-tam').textContent = `${d.gravacoes.tamanho} em disco`;
-
-    document.getElementById('m-rep-qtd').textContent = d.replays.qtd;
-    document.getElementById('m-rep-tam').textContent = `${d.replays.tamanho} em disco`;
-
-    document.getElementById('m-prev-qtd').textContent = d.previews.qtd;
-    document.getElementById('m-prev-tam').textContent = `${d.previews.tamanho} em disco`;
-
     document.getElementById('m-supa-tam').textContent = d.supabase.formatado;
     document.getElementById('m-supa-sub').textContent = `${d.supabase.qtd} arquivos (${d.supabase.pct}% de 1GB)`;
-    document.getElementById('m-bw-total').textContent = d.bandwidth;
-
     const bar = document.getElementById('m-supa-bar');
     bar.style.width = `${Math.min(d.supabase.pct, 100)}%`;
-    bar.style.background = d.supabase.pct > 80 ? '#ef4444' : '#3b82f6';
-  } catch (e) {
-    console.error("Erro ao puxar métricas:", e);
-  }
+    bar.style.background = d.supabase.pct > 80 ? 'var(--danger)' : 'var(--accent-blue)';
+  } catch (e) {}
 }
 
 async function atualizarFinanceiro() {
@@ -681,108 +929,41 @@ async function atualizarFinanceiro() {
     const res = await fetch('/api/financeiro');
     const d = await res.json();
 
-    // Hoje
     document.getElementById('fin-hoje-total').textContent = d.hoje.total;
     document.getElementById('fin-hoje-qtd').textContent = `${d.hoje.qtd} replays vendidos`;
     document.getElementById('fin-hoje-70').textContent = d.hoje.p70;
     document.getElementById('fin-hoje-30').textContent = d.hoje.p30;
 
-    // Mês Atual
     document.getElementById('fin-mes-total').textContent = d.mes.total;
     document.getElementById('fin-mes-qtd').textContent = `${d.mes.qtd} replays vendidos`;
     document.getElementById('fin-mes-70').textContent = d.mes.p70;
     document.getElementById('fin-mes-30').textContent = d.mes.p30;
 
-    // Total Acumulado
     document.getElementById('fin-geral-total').textContent = d.geral.total;
     document.getElementById('fin-geral-qtd').textContent = `${d.geral.qtd} vendas aprovadas`;
     document.getElementById('fin-geral-70').textContent = d.geral.p70;
     document.getElementById('fin-geral-30').textContent = d.geral.p30;
-  } catch (e) {
-    console.error("Erro financeiro:", e);
-  }
-}
-
-async function carregarCupons() {
-  const tbody = document.getElementById('lista-cupons');
-  try {
-    const res = await fetch('/api/cupons');
-    const cupons = await res.json();
-    tbody.innerHTML = '';
-    
-    if (!cupons || cupons.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="5" style="color: #64748b; padding: 14px 10px;">Nenhum cupom ativo no momento.</td></tr>';
-      return;
-    }
-
-    cupons.forEach(c => {
-      const desc = c.tipo === 'porcentagem' ? `${c.valor}% OFF` : `R$ ${parseFloat(c.valor).toFixed(2).replace(".", ",")} OFF`;
-      tbody.innerHTML += `
-        <tr>
-          <td><span class="tag-code">${c.codigo}</span></td>
-          <td style="text-transform: capitalize; color: #cbd5e1;">${c.tipo}</td>
-          <td style="color: #4ade80; font-weight: 600;">${desc}</td>
-          <td style="color: #94a3b8;">${c.usos || 0} vezes</td>
-          <td><button class="btn btn-stop" style="padding: 5px 10px; font-size: 11px;" onclick="removerCupom('${c.id}')">Excluir</button></td>
-        </tr>
-      `;
-    });
-  } catch (e) {
-    tbody.innerHTML = '<tr><td colspan="5" style="color: #ef4444; padding: 14px 10px;">Falha ao carregar lista de cupons.</td></tr>';
-  }
-}
-
-async function adicionarCupom() {
-  const codigo = document.getElementById('cupom-nome').value.trim().toUpperCase();
-  const tipo = document.getElementById('cupom-tipo').value;
-  const valor = document.getElementById('cupom-valor').value;
-
-  if (!codigo || !valor || valor <= 0) {
-    alert("Informe um código e um valor de desconto válido.");
-    return;
-  }
-
-  const res = await fetch('/api/cupons', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ codigo, tipo, valor })
-  });
-
-  const d = await res.json();
-  if (res.ok) {
-    document.getElementById('cupom-nome').value = '';
-    document.getElementById('cupom-valor').value = '';
-    carregarCupons();
-  } else {
-    alert(d.erro || "Falha ao cadastrar cupom");
-  }
-}
-
-async function removerCupom(id) {
-  if (confirm("Remover permanentemente este cupom?")) {
-    const res = await fetch(`/api/cupons/${id}`, { method: 'DELETE' });
-    if (res.ok) {
-      carregarCupons();
-    } else {
-      alert("Erro ao excluir cupom");
-    }
-  }
+  } catch (e) {}
 }
 
 async function carregarConfiguracoes() {
   try {
     const res = await fetch('/api/configuracoes');
-    const data = await res.json();
-    document.getElementById('cfg-preco').value = data.preco_replay;
-    document.getElementById('cfg-duracao').value = data.duracao_replay_segundos;
-  } catch (e) {
-    console.error("Erro ao carregar configurações:", e);
-  }
+    const d = await res.json();
+    document.getElementById('cfg-preco').value = d.preco_replay;
+    document.getElementById('cfg-buffer').value = d.duracao_buffer_segundos || 60;
+    document.getElementById('cfg-tempo-pre').value = d.tempo_pre_clique_segundos || 20;
+    document.getElementById('cfg-tempo-pos').value = d.tempo_pos_clique_segundos || 5;
+    document.getElementById('cfg-preview').value = d.duracao_preview_segundos || 5;
+  } catch (e) {}
 }
 
 async function salvarConfiguracoes() {
   const preco = parseFloat(document.getElementById('cfg-preco').value);
-  const duracao = parseInt(document.getElementById('cfg-duracao').value);
+  const buffer = parseInt(document.getElementById('cfg-buffer').value);
+  const pre = parseInt(document.getElementById('cfg-tempo-pre').value);
+  const pos = parseInt(document.getElementById('cfg-tempo-pos').value);
+  const prev = parseInt(document.getElementById('cfg-preview').value);
   const msgEl = document.getElementById('cfg-msg');
 
   try {
@@ -791,29 +972,84 @@ async function salvarConfiguracoes() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         preco_replay: preco,
-        duracao_replay_segundos: duracao
+        duracao_buffer_segundos: buffer,
+        tempo_pre_clique_segundos: pre,
+        tempo_pos_clique_segundos: pos,
+        duracao_preview_segundos: prev
       })
     });
     const d = await res.json();
-    
     msgEl.style.display = 'block';
     if (res.ok) {
-      msgEl.style.background = '#064e3b';
-      msgEl.style.color = '#34d399';
-      msgEl.textContent = 'Configurações salvas! Novos replays e cobranças Pix usarão esses valores imediatamente.';
+      msgEl.style.background = 'rgba(0, 230, 118, 0.15)';
+      msgEl.style.color = 'var(--accent)';
+      msgEl.textContent = 'Parâmetros atualizados! camera.py e server.py aplicarão esses valores.';
     } else {
-      msgEl.style.background = '#7f1d1d';
-      msgEl.style.color = '#f87171';
+      msgEl.style.background = 'rgba(239, 68, 68, 0.15)';
+      msgEl.style.color = 'var(--danger)';
       msgEl.textContent = d.erro || 'Falha ao salvar.';
     }
   } catch (e) {
     msgEl.style.display = 'block';
-    msgEl.style.background = '#7f1d1d';
-    msgEl.style.color = '#f87171';
-    msgEl.textContent = 'Erro ao se comunicar com o servidor.';
+    msgEl.style.background = 'rgba(239, 68, 68, 0.15)';
+    msgEl.style.color = 'var(--danger)';
+    msgEl.textContent = 'Erro de comunicação.';
   }
-
   setTimeout(() => { msgEl.style.display = 'none'; }, 4000);
+}
+
+async function carregarCupons() {
+  const tbody = document.getElementById('lista-cupons');
+  try {
+    const res = await fetch('/api/cupons');
+    const cupons = await res.json();
+    tbody.innerHTML = '';
+    if (!cupons || cupons.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" style="color: #64748b; padding: 14px 10px;">Nenhum cupom ativo.</td></tr>';
+      return;
+    }
+    cupons.forEach(c => {
+      const desc = c.tipo === 'porcentagem' ? `${c.valor}% OFF` : `R$ ${parseFloat(c.valor).toFixed(2).replace(".", ",")} OFF`;
+      tbody.innerHTML += `
+        <tr>
+          <td><span class="tag-code">${c.codigo}</span></td>
+          <td style="text-transform: capitalize; color: #cbd5e1;">${c.tipo}</td>
+          <td style="color: var(--accent); font-weight: 700;">${desc}</td>
+          <td style="color: #94a3b8;">${c.usos || 0}x</td>
+          <td><button class="btn btn-stop" style="padding: 4px 8px; font-size: 11px;" onclick="removerCupom('${c.id}')">Excluir</button></td>
+        </tr>
+      `;
+    });
+  } catch (e) {}
+}
+
+async function adicionarCupom() {
+  const codigo = document.getElementById('cupom-nome').value.trim().toUpperCase();
+  const tipo = document.getElementById('cupom-tipo').value;
+  const valor = document.getElementById('cupom-valor').value;
+
+  if (!codigo || !valor) return alert("Informe código e valor.");
+
+  const res = await fetch('/api/cupons', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ codigo, tipo, valor })
+  });
+  if (res.ok) {
+    document.getElementById('cupom-nome').value = '';
+    document.getElementById('cupom-valor').value = '';
+    carregarCupons();
+  } else {
+    const d = await res.json();
+    alert(d.erro || "Falha ao criar cupom");
+  }
+}
+
+async function removerCupom(id) {
+  if (confirm("Excluir este cupom?")) {
+    await fetch(`/api/cupons/${id}`, { method: 'DELETE' });
+    carregarCupons();
+  }
 }
 
 async function listarCameras() {
@@ -823,7 +1059,7 @@ async function listarCameras() {
     const data = await res.json();
     select.innerHTML = '';
     if (!data || data.length === 0) {
-      select.innerHTML = '<option value="0">Nenhuma câmera detectada (Fallback: 0)</option>';
+      select.innerHTML = '<option value="0">Dispositivo Padrão (Índice 0)</option>';
       return;
     }
     data.forEach(cam => {
@@ -833,8 +1069,20 @@ async function listarCameras() {
       select.appendChild(opt);
     });
   } catch (e) {
-    select.innerHTML = '<option value="0">Erro ao listar dispositivos</option>';
+    select.innerHTML = '<option value="0">Índice 0</option>';
   }
+}
+
+function abrirPreviewCamera() {
+  const camIdx = document.getElementById('camera-select').value;
+  const feedImg = document.getElementById('feed-img');
+  feedImg.src = `/video_feed?index=${camIdx}&t=${Date.now()}`;
+  document.getElementById('camera-modal').classList.add('open');
+}
+
+function fecharPreviewCamera() {
+  document.getElementById('feed-img').src = '';
+  document.getElementById('camera-modal').classList.remove('open');
 }
 
 async function iniciar(servico) {
@@ -858,19 +1106,21 @@ async function parar(servico) {
 }
 
 function carregarTudo() {
+  const icon = document.getElementById('btn-sync-icon');
+  if (icon) icon.classList.add('lucide-spin');
   atualizarStatus();
   atualizarMetricas();
   atualizarFinanceiro();
-  carregarCupons();
   carregarConfiguracoes();
+  carregarCupons();
+  setTimeout(() => { if (icon) icon.classList.remove('lucide-spin'); }, 600);
 }
 
 listarCameras();
 carregarTudo();
-
 setInterval(atualizarStatus, 3000);
-setInterval(atualizarMetricas, 10000);
 setInterval(atualizarFinanceiro, 15000);
+setTimeout(() => { if (window.lucide) lucide.createIcons(); }, 100);
 </script>
 </body>
 </html>

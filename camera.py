@@ -6,12 +6,11 @@ import shutil
 import subprocess
 import threading
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime
 from queue import Queue
 
 import cv2
 from dotenv import load_dotenv
-import requests as remote_req
 from supabase import create_client
 
 load_dotenv()
@@ -28,13 +27,13 @@ GRAVACOES_DIR = os.path.join(BASE_DIR, "Gravações")
 REPLAYS_DIR   = os.path.join(BASE_DIR, "Replays")
 PREVIEWS_DIR  = os.path.join(BASE_DIR, "Previews")
 CONFIG_FILE   = os.path.join(BASE_DIR, "config.json")
+BANDWIDTH_FILE = os.path.join(BASE_DIR, "bandwidth.json")
+LOG_FILE       = os.path.join(BASE_DIR, "log.txt")
 
 os.makedirs(GRAVACOES_DIR, exist_ok=True)
 os.makedirs(REPLAYS_DIR, exist_ok=True)
 os.makedirs(PREVIEWS_DIR, exist_ok=True)
 
-
-# Suporte inteligente para Linux e Windows:
 if sys.platform == "win32":
     FFMPEG_BIN = os.path.join(BASE_DIR, "ffmpeg.exe")
     if not os.path.exists(FFMPEG_BIN):
@@ -42,37 +41,31 @@ if sys.platform == "win32":
 else:
     FFMPEG_BIN = shutil.which("ffmpeg") or "ffmpeg"
 
-LOG_FILE       = os.path.join(BASE_DIR, "log.txt")
-ALERTA_FILE    = os.path.join(BASE_DIR, "ALERTA.txt")
-BANDWIDTH_FILE = os.path.join(BASE_DIR, "bandwidth.json")
-
 # ============================================================
 # PARÂMETROS OPERACIONAIS
 # ============================================================
-FPS              = int(os.getenv("CAMERA_FPS", "30"))
-SEGMENT_DURATION = int(os.getenv("SEGMENT_DURATION_SEC", "3600"))
+FPS = int(os.getenv("CAMERA_FPS", "30"))
 
-STORAGE_LIMITE_BYTES   = int(os.getenv("STORAGE_LIMITE_BYTES", str(1 * 1024 * 1024 * 1024)))
-BANDWIDTH_LIMITE_BYTES = int(os.getenv("BANDWIDTH_LIMITE_BYTES", str(2 * 1024 * 1024 * 1024)))
-ALERTA_PERCENTUAL      = 70.0
-
-CONTINUO_LOCAL_HORAS = 5
-REPLAY_LOCAL_HORAS   = 24
-PREVIEW_LOCAL_HORAS  = 2
-NUVEM_HORAS          = 24
-
-REMOTE_PANEL_URL = os.getenv("REMOTE_PANEL_URL", "")
-
-
-def obter_duracao_replay():
+def carregar_config():
+    padrao = {
+        "preco_replay": 0.15,
+        "duracao_buffer_segundos": 60,
+        "tempo_pre_clique_segundos": 40,
+        "tempo_pos_clique_segundos": 0,
+        "duracao_preview_segundos": 5,
+        "camera_a_index": 0,
+        "camera_d_index": 1
+    }
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 dados = json.load(f)
-                return int(dados.get("duracao_replay_segundos", 20))
+                padrao.update(dados)
         except Exception:
             pass
-    return int(os.getenv("REPLAY_DURATION_SEC", "20"))
+    return padrao
+
+cfg = carregar_config()
 
 # ============================================================
 # SUPABASE CLIENT
@@ -86,14 +79,15 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ============================================================
-# CONTROLE DE EXECUÇÃO E LOGS
+# BUFFERS CIRCULARES E FILA DE PROCESSAMENTO
 # ============================================================
 running = True
-# Buffer com capacidade de até 300 segundos (5 minutos) para suportar durações configuráveis
-MAX_BUFFER_SEGUNDOS = 300
-frame_buffer = deque(maxlen=FPS * MAX_BUFFER_SEGUNDOS)
+MAX_BUFFER_SEGUNDOS = int(cfg.get("duracao_buffer_segundos", 60))
+MAX_FRAMES = FPS * MAX_BUFFER_SEGUNDOS
+
+buffer_cam_a = deque(maxlen=MAX_FRAMES)
+buffer_cam_d = deque(maxlen=MAX_FRAMES)
 event_queue = Queue()
-cap = None
 
 
 def log_error(msg):
@@ -104,173 +98,61 @@ def log_error(msg):
         pass
 
 
-def carregar_bandwidth():
-    try:
-        if os.path.exists(BANDWIDTH_FILE):
-            with open(BANDWIDTH_FILE, "r", encoding="utf-8") as f:
-                return json.load(f).get("usado_bytes", 0)
-    except Exception as e:
-        log_error(f"Erro ao carregar bandwidth: {e}")
-    return 0
-
-
-def salvar_bandwidth(bytes_usados):
-    try:
-        with open(BANDWIDTH_FILE, "w", encoding="utf-8") as f:
-            json.dump({"usado_bytes": bytes_usados}, f)
-    except Exception as e:
-        log_error(f"Erro ao salvar bandwidth: {e}")
-
-
 def adicionar_bandwidth(file_path):
     try:
         if os.path.exists(file_path):
             tamanho = os.path.getsize(file_path)
-            atual = carregar_bandwidth()
-            salvar_bandwidth(atual + tamanho)
-    except Exception as e:
-        log_error(f"Erro ao atualizar bandwidth: {e}")
-
-
-def formatar_tamanho(bytes_val):
-    if bytes_val >= 1024 * 1024 * 1024:
-        return f"{bytes_val / (1024**3):.2f}GB"
-    elif bytes_val >= 1024 * 1024:
-        return f"{bytes_val / (1024**2):.1f}MB"
-    return f"{bytes_val / 1024:.1f}KB"
+            usado = 0
+            if os.path.exists(BANDWIDTH_FILE):
+                with open(BANDWIDTH_FILE, "r", encoding="utf-8") as f:
+                    usado = json.load(f).get("usado_bytes", 0)
+            with open(BANDWIDTH_FILE, "w", encoding="utf-8") as f:
+                json.dump({"usado_bytes": usado + tamanho}, f)
+    except Exception:
+        pass
 
 # ============================================================
-# MONITORAMENTO E ALERTAS
+# THREADS DE CAPTURA INDEPENDENTES
 # ============================================================
-def verificar_alertas():
-    try:
-        storage_usado = 0
-        try:
-            arquivos = supabase.storage.from_("replays").list()
-            for arq in arquivos:
-                storage_usado += arq.get("metadata", {}).get("size", 0)
-        except Exception as e:
-            log_error(f"Erro storage Supabase: {e}")
-
-        bandwidth_usado = carregar_bandwidth()
-        storage_pct = (storage_usado / STORAGE_LIMITE_BYTES) * 100
-        bandwidth_pct = (bandwidth_usado / BANDWIDTH_LIMITE_BYTES) * 100
-
-        if storage_pct >= ALERTA_PERCENTUAL or bandwidth_pct >= ALERTA_PERCENTUAL:
-            conteudo = (
-                f"=== ALERTA DO SISTEMA ===\n"
-                f"Data: {datetime.now().strftime('%d/%m/%Y %H:%M')}\n\n"
-                f"STORAGE:   {storage_pct:.1f}% ({formatar_tamanho(storage_usado)})\n"
-                f"BANDWIDTH: {bandwidth_pct:.1f}% ({formatar_tamanho(bandwidth_usado)})\n"
-            )
-            with open(ALERTA_FILE, "w", encoding="utf-8") as f:
-                f.write(conteudo)
-        elif os.path.exists(ALERTA_FILE):
-            os.remove(ALERTA_FILE)
-
-        return storage_pct, bandwidth_pct
-    except Exception as e:
-        log_error(f"Erro verificar_alertas: {e}")
-        return 0.0, 0.0
-
-
-def monitorar():
-    global running, cap
+def capturar_camera(idx, buffer_destino, tag):
+    backend = cv2.CAP_MSMF if sys.platform == "win32" else cv2.CAP_ANY
     while running:
-        try:
-            storage_pct, bandwidth_pct = verificar_alertas()
+        cap = cv2.VideoCapture(int(idx), backend)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        cap.set(cv2.CAP_PROP_FPS, FPS)
 
-            if REMOTE_PANEL_URL:
-                status_cam = "ONLINE" if (cap is not None and cap.isOpened()) else "OFFLINE"
-                ultimo_erro = ""
-                if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 0:
-                    with open(LOG_FILE, "r", encoding="utf-8") as f:
-                        linhas = f.readlines()
-                        if linhas:
-                            ultimo_erro = linhas[-1].strip()[:255]
+        if not cap.isOpened():
+            print(f"[ERRO] Falha ao conectar {tag} no índice {idx}. Reconectando em 5s...", flush=True)
+            time.sleep(5)
+            continue
 
-                payload = {
-                    "storage_pct": round(storage_pct, 1),
-                    "bandwidth_pct": round(bandwidth_pct, 1),
-                    "status_camera": status_cam,
-                    "ultimo_erro": ultimo_erro
-                }
-                try:
-                    remote_req.post(REMOTE_PANEL_URL, json=payload, timeout=10)
-                except Exception:
-                    pass
-        except Exception as e:
-            log_error(f"Erro monitorar: {e}")
+        print(f"[ONLINE] {tag} ativa no dispositivo {idx}", flush=True)
+        while running:
+            ret, frame = cap.read()
+            if not ret:
+                print(f"[ALERTA] Perda de sinal em {tag}. Tentando reconectar...", flush=True)
+                break
+            buffer_destino.append(frame)
 
-        time.sleep(300)
+        cap.release()
+        time.sleep(2)
 
 # ============================================================
-# ROTINAS DE LIMPEZA
+# PROCESSAMENTO DE VÍDEO E UPLOAD (SUPABASE)
 # ============================================================
-def deletar_arquivos_locais(pasta, horas):
+def save_replay(frames, prefixo):
     try:
-        agora = time.time()
-        limite_seg = horas * 3600
-        for arq in os.listdir(pasta):
-            caminho = os.path.join(pasta, arq)
-            if os.path.isfile(caminho) and (agora - os.path.getmtime(caminho)) > limite_seg:
-                try:
-                    os.remove(caminho)
-                except Exception as e:
-                    log_error(f"Erro ao remover {arq}: {e}")
-    except Exception as e:
-        log_error(f"Erro ao varrer {pasta}: {e}")
-
-
-def limpar_supabase():
-    try:
-        limite_ts = datetime.now(timezone.utc).timestamp() - (NUVEM_HORAS * 3600)
-        resultado = supabase.table("replays").select("id, nome, preview_nome, criado_em").execute()
-
-        for item in resultado.data or []:
-            criado_em = item.get("criado_em")
-            if not criado_em:
-                continue
-
-            criado_ts = datetime.fromisoformat(criado_em.replace("Z", "+00:00")).timestamp()
-            if criado_ts < limite_ts:
-                remocoes = [n for n in [item.get("nome"), item.get("preview_nome")] if n]
-                if remocoes:
-                    try:
-                        supabase.storage.from_("replays").remove(remocoes)
-                    except Exception as e:
-                        log_error(f"Erro storage remove {remocoes}: {e}")
-
-                supabase.table("replays").delete().eq("id", item["id"]).execute()
-    except Exception as e:
-        log_error(f"Erro limpar_supabase: {e}")
-
-
-def rotina_limpeza():
-    global running
-    while running:
-        deletar_arquivos_locais(GRAVACOES_DIR, CONTINUO_LOCAL_HORAS)
-        deletar_arquivos_locais(REPLAYS_DIR, REPLAY_LOCAL_HORAS)
-        deletar_arquivos_locais(PREVIEWS_DIR, PREVIEW_LOCAL_HORAS)
-        limpar_supabase()
-        time.sleep(300)
-
-# ============================================================
-# PROCESSAMENTO DE VÍDEO (FFMPEG / OPENCV)
-# ============================================================
-def save_replay(frames):
-    try:
-        print(f"[PROCESSANDO] Gravando arquivo temporário do replay ({len(frames)} frames)...", flush=True)
         h, w, _ = frames[0].shape
-        temp = os.path.join(REPLAYS_DIR, f"temp_{int(time.time())}.avi")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        temp = os.path.join(REPLAYS_DIR, f"temp_{prefixo}_{int(time.time())}.avi")
         out = cv2.VideoWriter(temp, cv2.VideoWriter_fourcc(*"XVID"), FPS, (w, h))
 
         for f in frames:
             out.write(f)
         out.release()
 
-        final = os.path.join(REPLAYS_DIR, f"replay_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4")
-        print("[FFMPEG] Convertendo replay para H.264 MP4...", flush=True)
+        final = os.path.join(REPLAYS_DIR, f"replay_{prefixo}_{timestamp}.mp4")
         subprocess.run([
             FFMPEG_BIN, "-y", "-i", temp,
             "-vcodec", "libx264", "-pix_fmt", "yuv420p",
@@ -280,41 +162,37 @@ def save_replay(frames):
 
         if os.path.exists(temp):
             os.remove(temp)
-        print(f"[SUCESSO] Replay local salvo: {final}", flush=True)
         return final
     except Exception as e:
-        log_error(f"Erro save_replay: {e}")
-        print(f"[ERRO] Falha ao salvar replay: {e}", flush=True)
+        log_error(f"Erro save_replay ({prefixo}): {e}")
         return None
 
 
-def save_preview(video_path):
+def save_preview(video_path, prefixo, duracao_preview):
     try:
-        print("[FFMPEG] Gerando preview de 5 segundos...", flush=True)
-        preview_path = os.path.join(PREVIEWS_DIR, f"preview_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        preview_path = os.path.join(PREVIEWS_DIR, f"preview_{prefixo}_{timestamp}.mp4")
         subprocess.run([
-            FFMPEG_BIN, "-y", "-i", video_path, "-t", "5",
+            FFMPEG_BIN, "-y", "-i", video_path, "-t", str(duracao_preview),
             "-vcodec", "libx264", "-pix_fmt", "yuv420p",
             "-movflags", "+faststart", "-crf", "28", "-preset", "fast", "-an",
             preview_path
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
         if os.path.exists(preview_path):
-            print(f"[SUCESSO] Preview gerado: {preview_path}", flush=True)
             return preview_path
         return None
     except Exception as e:
-        log_error(f"Erro save_preview: {e}")
-        print(f"[ERRO] Falha ao gerar preview: {e}", flush=True)
+        log_error(f"Erro save_preview ({prefixo}): {e}")
         return None
 
 
-def upload_video(file_path, preview_path):
+def upload_video(file_path, preview_path, prefixo):
     try:
-        print("[SUPABASE] Iniciando upload para o Storage...", flush=True)
+        print(f"[SUPABASE] Enviando {prefixo} para o Storage...", flush=True)
         tag_tempo = datetime.now().strftime("%Hh%Mmin%Sseg")
-        file_name = f"replay_{tag_tempo}.mp4"
-        preview_name = f"preview_{tag_tempo}.mp4"
+        file_name = f"replay_{prefixo}_{tag_tempo}.mp4"
+        preview_name = f"preview_{prefixo}_{tag_tempo}.mp4"
 
         with open(file_path, "rb") as f:
             supabase.storage.from_("replays").upload(file_name, f, {"content-type": "video/mp4"})
@@ -325,130 +203,91 @@ def upload_video(file_path, preview_path):
         url = supabase.storage.from_("replays").get_public_url(file_name)
         preview_url = supabase.storage.from_("replays").get_public_url(preview_name)
 
-        print("[SUPABASE] Registrando metadados na tabela 'replays'...", flush=True)
         supabase.table("replays").insert({
             "nome": file_name,
             "url": url,
             "preview_url": preview_url,
-            "preview_nome": preview_name
+            "preview_nom": preview_name
         }).execute()
 
         adicionar_bandwidth(file_path)
         adicionar_bandwidth(preview_path)
-        print(f"[CONCLUÍDO] Vídeo e preview disponíveis na nuvem!\nURL: {url}", flush=True)
+        print(f"[CONCLUÍDO] Replay da {prefixo} sincronizado na nuvem!\nURL: {url}", flush=True)
         return url
     except Exception as e:
-        log_error(f"Erro upload_video: {e}")
-        print(f"[ERRO] Falha no upload ao Supabase: {e}", flush=True)
+        log_error(f"Erro upload_video ({prefixo}): {e}")
+        print(f"[ERRO] Falha ao enviar para o Supabase: {e}", flush=True)
         return None
 
 
 def process_events():
-    global running
     while running:
         try:
             if not event_queue.empty():
-                event = event_queue.get()
-                if event == "SAVE" and len(frame_buffer) > 0:
-                    duracao = obter_duracao_replay()
-                    frames_necessarios = FPS * duracao
-                    total_disponivel = len(frame_buffer)
-                    
-                    # Corta exatamente a quantidade de frames da configuração atual
-                    qtd_corte = min(total_disponivel, frames_necessarios)
-                    frames = list(frame_buffer)[-qtd_corte:]
-                    
-                    print(f"\n[EVENTO] Tecla [S] acionada! Extraindo {qtd_corte} quadros ({duracao}s configurados)...", flush=True)
-                    replay = save_replay(frames)
+                evento = event_queue.get()
+                cam_tag = evento["cam"]  # "cam1" ou "cam2"
+                buf = buffer_cam_a if cam_tag == "cam1" else buffer_cam_d
+
+                config_atual = carregar_config()
+                pre_sec = int(config_atual.get("tempo_pre_clique_segundos", 40))
+                prev_sec = int(config_atual.get("duracao_preview_segundos", 5))
+                frames_necessarios = FPS * pre_sec
+
+                if len(buf) > 0:
+                    qtd_corte = min(len(buf), frames_necessarios)
+                    frames = list(buf)[-qtd_corte:]
+                    print(f"\n[GATILHO {cam_tag.upper()}] Extraindo últimos {qtd_corte/FPS:.1f}s do lance...", flush=True)
+
+                    replay = save_replay(frames, cam_tag)
                     if replay:
-                        preview = save_preview(replay)
+                        preview = save_preview(replay, cam_tag, prev_sec)
                         if preview:
-                            upload_video(replay, preview)
+                            upload_video(replay, preview, cam_tag)
         except Exception as e:
             log_error(f"Erro process_events: {e}")
-            print(f"[ERRO] Falha na fila de eventos: {e}", flush=True)
         time.sleep(0.01)
 
 # ============================================================
-# LOOP PRINCIPAL DE CAPTURA
+# INICIALIZAÇÃO
 # ============================================================
-def inicializar_camera(index=0):
-    backend = cv2.CAP_MSMF if sys.platform == "win32" else cv2.CAP_ANY
-    while running:
-        cap_dev = cv2.VideoCapture(index, backend)
-        if cap_dev.isOpened():
-            print(f"[OK] Câmera conectada com sucesso no índice {index}", flush=True)
-            return cap_dev
-        log_error(f"Falha ao abrir sinal da câmera no índice {index}. Tentando novamente em 5s...")
-        time.sleep(5)
-    return None
-
-
 def main():
-    global running, cap
+    global running
 
-    for func in [process_events, monitorar, rotina_limpeza]:
-        threading.Thread(target=func, daemon=True).start()
+    config_inicial = carregar_config()
+    cam_a_idx = int(config_inicial.get("camera_a_index", 0))
+    cam_d_idx = int(config_inicial.get("camera_d_index", 1))
 
-    camera_idx = int(os.getenv("CAMERA_INDEX", "0"))
-    cap = inicializar_camera(camera_idx)
-    if not cap:
-        return
+    # Thread da fila de processamento
+    threading.Thread(target=process_events, daemon=True).start()
 
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fourcc = cv2.VideoWriter_fourcc(*"XVID")
+    # Threads independentes de gravação circular
+    threading.Thread(target=capturar_camera, args=(cam_a_idx, buffer_cam_a, "CÂMERA 1 (A)"), daemon=True).start()
+    threading.Thread(target=capturar_camera, args=(cam_d_idx, buffer_cam_d, "CÂMERA 2 (D)"), daemon=True).start()
 
-    def novo_arquivo():
-        return os.path.join(GRAVACOES_DIR, f"gravacao_{datetime.now().strftime('%Y%m%d_%H%M%S')}.avi")
+    print("\n=======================================================")
+    print("      KLIP REPLAY - SISTEMA DE CÂMERAS DUPLAS         ")
+    print(f"  [A] Salva lance da CÂMERA 1 (Índice {cam_a_idx})      ")
+    print(f"  [D] Salva lance da CÂMERA 2 (Índice {cam_d_idx})      ")
+    print("  [Q] Encerra o serviço                                ")
+    print("=======================================================\n", flush=True)
 
-    current_file = novo_arquivo()
-    out = cv2.VideoWriter(current_file, fourcc, FPS, (width, height))
-    start_time = time.time()
-
-    print(f"[CÂMERA ONLINE] Gravando no dispositivo {camera_idx}: {current_file}", flush=True)
-    print("Comandos: [S] Salvar replay | [Q] Sair", flush=True)
+    # Mini-janela de controle de foco de teclado (sem ocupar a tela inteira)
+    cv2.namedWindow("KLIP_CONTROLE", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("KLIP_CONTROLE", 300, 80)
 
     try:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                log_error("Sinal de vídeo interrompido. Reiniciando captura...")
-                print("[AVISO] Sinal de vídeo interrompido. Tentando reconectar...", flush=True)
-                out.release()
-                cap.release()
-                cap = inicializar_camera(camera_idx)
-                if not cap:
-                    break
-                current_file = novo_arquivo()
-                out = cv2.VideoWriter(current_file, fourcc, FPS, (width, height))
-                start_time = time.time()
-                continue
-
-            frame_buffer.append(frame)
-            out.write(frame)
-
-            if time.time() - start_time > SEGMENT_DURATION:
-                out.release()
-                current_file = novo_arquivo()
-                out = cv2.VideoWriter(current_file, fourcc, FPS, (width, height))
-                start_time = time.time()
-
-            cv2.imshow("Preview - Sistema Replay", frame)
-            key = cv2.waitKey(1) & 0xFF
-
-            if key == ord("s"):
-                event_queue.put("SAVE")
-            elif key == ord("q"):
+        while running:
+            key = cv2.waitKey(30) & 0xFF
+            if key in (ord("a"), ord("A")):
+                event_queue.put({"cam": "cam1"})
+            elif key in (ord("d"), ord("D")):
+                event_queue.put({"cam": "cam2"})
+            elif key in (ord("q"), ord("Q")):
                 break
-    except Exception as e:
-        log_error(f"Erro loop principal: {e}")
+    except KeyboardInterrupt:
+        pass
     finally:
         running = False
-        if cap and cap.isOpened():
-            cap.release()
-        if out:
-            out.release()
         cv2.destroyAllWindows()
 
 

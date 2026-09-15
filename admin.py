@@ -50,9 +50,11 @@ def carregar_config_local():
     padrao = {
         "preco_replay": 0.15,
         "duracao_buffer_segundos": 60,
-        "tempo_pre_clique_segundos": 20,
-        "tempo_pos_clique_segundos": 5,
-        "duracao_preview_segundos": 5
+        "tempo_pre_clique_segundos": 40,
+        "tempo_pos_clique_segundos": 0,
+        "duracao_preview_segundos": 5,
+        "camera_a_index": 0,
+        "camera_d_index": 1
     }
     if os.path.exists(CONFIG_FILE):
         try:
@@ -255,6 +257,31 @@ def get_financeiro():
         print(f"[ERRO FINANCEIRO] {e}", flush=True)
         return jsonify({"hoje": padrao, "mes": padrao, "geral": padrao})
 
+@app.route("/api/logs-atividades", methods=["GET"])
+def get_logs_atividades():
+    if not supabase:
+        return jsonify({"compras": [], "downloads": []}), 200
+    try:
+        vendas = (
+            supabase.table("vendas")
+            .select("replay_nome, valor, payment_id, criado_em")
+            .order("criado_em", desc=True)
+            .limit(50)
+            .execute()
+        ).data or []
+
+        downloads = (
+            supabase.table("log_downloads")
+            .select("nome_video, baixado_em, ip_origem")
+            .order("baixado_em", desc=True)
+            .limit(50)
+            .execute()
+        ).data or []
+
+        return jsonify({"compras": vendas, "downloads": downloads}), 200
+    except Exception as e:
+        return jsonify({"erro": str(e), "compras": [], "downloads": []}), 500
+
 @app.route("/api/configuracoes", methods=["GET"])
 def get_configuracoes():
     return jsonify(carregar_config_local()), 200
@@ -265,9 +292,11 @@ def post_configuracoes():
     try:
         preco = float(dados.get("preco_replay", 0.15))
         buffer_total = int(dados.get("duracao_buffer_segundos", 60))
-        tempo_pre = int(dados.get("tempo_pre_clique_segundos", 20))
-        tempo_pos = int(dados.get("tempo_pos_clique_segundos", 5))
+        tempo_pre = int(dados.get("tempo_pre_clique_segundos", 40))
+        tempo_pos = int(dados.get("tempo_pos_clique_segundos", 0))
         duracao_prev = int(dados.get("duracao_preview_segundos", 5))
+        cam_a = int(dados.get("camera_a_index", 0))
+        cam_d = int(dados.get("camera_d_index", 1))
 
         if preco < 0.10:
             return jsonify({"erro": "O preço mínimo é R$ 0,10"}), 400
@@ -285,7 +314,9 @@ def post_configuracoes():
             "duracao_buffer_segundos": buffer_total,
             "tempo_pre_clique_segundos": tempo_pre,
             "tempo_pos_clique_segundos": tempo_pos,
-            "duracao_preview_segundos": duracao_prev
+            "duracao_preview_segundos": duracao_prev,
+            "camera_a_index": cam_a,
+            "camera_d_index": cam_d
         }
 
         if salvar_config_local(nova_config):
@@ -358,8 +389,9 @@ def iniciar_servico(servico):
     env = os.environ.copy()
     if servico == "camera":
         body = request.get_json(silent=True) or {}
-        cam_idx = str(body.get("camera_index", "0"))
-        env["CAMERA_INDEX"] = cam_idx
+        cfg = carregar_config_local()
+        env["CAMERA_A_INDEX"] = str(body.get("camera_a_index", cfg.get("camera_a_index", 0)))
+        env["CAMERA_D_INDEX"] = str(body.get("camera_d_index", cfg.get("camera_d_index", 1)))
 
     proc = subprocess.Popen([PYTHON_EXE, script], cwd=BASE_DIR, env=env, shell=False)
     processos[servico] = proc
@@ -400,14 +432,13 @@ def gerar_frames_preview(cam_idx):
             sucesso, frame = cap.read()
             if not sucesso:
                 break
-            # Insere data/hora no frame de teste
             texto = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-            cv2.putText(frame, texto, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 230, 118), 2)
+            cv2.putText(frame, f"CAM [{cam_idx}] - {texto}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 230, 118), 2)
             
             _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
             yield (b'--frame\r\n'
                    b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
-            time.sleep(0.04) # ~25 FPS
+            time.sleep(0.04)
     finally:
         cap.release()
 
@@ -478,7 +509,7 @@ HTML_DASHBOARD = """
   .brand-sub { font-size: 12px; color: var(--text-secondary); }
 
   /* TABS */
-  .tabs { display: flex; gap: 10px; margin-bottom: 24px; }
+  .tabs { display: flex; gap: 10px; margin-bottom: 24px; flex-wrap: wrap; }
   .tab-btn {
     background: var(--bg-card);
     border: 1px solid var(--border);
@@ -625,7 +656,7 @@ HTML_DASHBOARD = """
   .config-item label { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
   .config-item small { font-size: 11px; color: #64748b; line-height: 1.4; }
 
-  /* TABELA CUPONS */
+  /* TABELAS */
   .cupom-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; }
   .cupom-table th { padding: 12px; border-bottom: 1px solid var(--border); color: var(--text-secondary); font-weight: 700; text-align: left; }
   .cupom-table td { padding: 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
@@ -698,6 +729,7 @@ HTML_DASHBOARD = """
     <button class="tab-btn active" onclick="trocarAba('visao-geral')"><i data-lucide="activity"></i> Operação & Sistema</button>
     <button class="tab-btn" onclick="trocarAba('tempos')"><i data-lucide="clock"></i> Tempos & Replay</button>
     <button class="tab-btn" onclick="trocarAba('cupons')"><i data-lucide="tag"></i> Cupons Promocionais</button>
+    <button class="tab-btn" onclick="trocarAba('logs')"><i data-lucide="file-text"></i> Logs de Vendas & Downloads</button>
   </div>
 
   <!-- ABA 1: OPERAÇÃO E DISPOSITIVOS -->
@@ -764,19 +796,31 @@ HTML_DASHBOARD = """
 
     <div class="card">
       <div class="card-title">
-        <span>Captura da Câmera & Detecção de Lance (camera.py)</span>
+        <span>Captura de Câmeras Duplas & Gravação (camera.py)</span>
         <span id="badge-camera" class="status-badge status-offline"><span class="dot-pulse"></span>OFFLINE</span>
       </div>
-      <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:8px;">Dispositivo de Vídeo Conectado:</label>
-      <select id="camera-select">
-        <option value="0">Detectando câmeras...</option>
-      </select>
+
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 16px;">
+        <div>
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+            <label style="font-size:12px; color:var(--text-secondary); font-weight:700;">Câmera 1 (Acionador: Tecla [A]):</label>
+            <button class="btn btn-outline" style="padding: 2px 8px; font-size: 10px;" onclick="abrirPreviewCamera('A')"><i data-lucide="eye" style="width:12px;height:12px;"></i> Testar CAM 1</button>
+          </div>
+          <select id="camera-a-select"><option value="0">Detectando...</option></select>
+        </div>
+
+        <div>
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+            <label style="font-size:12px; color:var(--text-secondary); font-weight:700;">Câmera 2 (Acionador: Tecla [D]):</label>
+            <button class="btn btn-outline" style="padding: 2px 8px; font-size: 10px;" onclick="abrirPreviewCamera('D')"><i data-lucide="eye" style="width:12px;height:12px;"></i> Testar CAM 2</button>
+          </div>
+          <select id="camera-d-select"><option value="1">Detectando...</option></select>
+        </div>
+      </div>
       
       <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-        <button class="btn btn-start" onclick="iniciarCamera()"><i data-lucide="play"></i> Iniciar Gravação Câmera</button>
-        <button class="btn btn-stop" onclick="parar('camera')"><i data-lucide="square"></i> Parar Câmera</button>
-        <!-- BOTÃO DE VISUALIZAÇÃO SOB DEMANDA (SEM JANELA FIXA) -->
-        <button class="btn btn-blue" onclick="abrirPreviewCamera()"><i data-lucide="eye"></i> Visualizar Câmera (Preview)</button>
+        <button class="btn btn-start" onclick="iniciarCamera()"><i data-lucide="play"></i> Iniciar Gravação das Câmeras</button>
+        <button class="btn btn-stop" onclick="parar('camera')"><i data-lucide="square"></i> Parar Câmeras</button>
       </div>
     </div>
   </div>
@@ -790,19 +834,19 @@ HTML_DASHBOARD = """
         <div class="config-item">
           <label>Buffer Total Mantido na Memória (segundos):</label>
           <input type="number" id="cfg-buffer" min="30" max="300">
-          <small>Tamanho da fila circular contínua (ex: 60s). Define o limite máximo que a câmera guarda.</small>
+          <small>Tamanho da fila circular contínua (ex: 60s). Define o limite máximo retido na memória.</small>
         </div>
 
         <div class="config-item">
           <label>Tempo Retroativo Pré-Clique (segundos):</label>
           <input type="number" id="cfg-tempo-pre" min="5" max="120">
-          <small>Quantos segundos antes de pressionar o botão da quadra devem entrar no replay.</small>
+          <small>Quantos segundos anteriores ao acionamento do botão entrarão no vídeo.</small>
         </div>
 
         <div class="config-item">
           <label>Tempo de Gravação Pós-Clique (segundos):</label>
           <input type="number" id="cfg-tempo-pos" min="0" max="30">
-          <small>Quantos segundos após o acionamento ainda serão gravados (para pegar a comemoração).</small>
+          <small>0 para salvar imediatamente no clique sem comemoração posterior.</small>
         </div>
 
         <div class="config-item">
@@ -856,6 +900,45 @@ HTML_DASHBOARD = """
       </table>
     </div>
   </div>
+
+  <!-- ABA 4: LOGS DE COMPRAS E DOWNLOADS -->
+  <div id="tab-logs" class="tab-content">
+    <div class="card">
+      <div class="card-title">
+        <span>Últimas Compras Pix Aprovadas</span>
+        <button class="btn btn-outline" style="padding: 4px 10px;" onclick="carregarLogsAtividades()"><i data-lucide="refresh-cw" style="width:14px;height:14px;"></i> Atualizar</button>
+      </div>
+      <table class="cupom-table">
+        <thead>
+          <tr>
+            <th>Horário da Compra</th>
+            <th>Nome do Lance</th>
+            <th>Valor Pago</th>
+            <th>ID Pagamento MP</th>
+          </tr>
+        </thead>
+        <tbody id="lista-logs-compras">
+          <tr><td colspan="4" style="color: #64748b;">Carregando compras...</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Histórico de Arquivos Baixados (MP4)</div>
+      <table class="cupom-table">
+        <thead>
+          <tr>
+            <th>Horário do Download</th>
+            <th>Arquivo Transferido</th>
+            <th>IP do Dispositivo</th>
+          </tr>
+        </thead>
+        <tbody id="lista-logs-downloads">
+          <tr><td colspan="3" style="color: #64748b;">Carregando downloads...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
 </div>
 
 <!-- MODAL DE PREVIEW DA CÂMERA -->
@@ -864,7 +947,7 @@ HTML_DASHBOARD = """
     <div class="modal-header">
       <div style="display: flex; align-items: center; gap: 8px;">
         <i data-lucide="camera" style="color: var(--accent); width: 18px; height: 18px;"></i>
-        <strong style="font-size: 14px;">Preview Ao Vivo do Dispositivo</strong>
+        <strong id="preview-modal-title" style="font-size: 14px;">Preview Ao Vivo do Dispositivo</strong>
       </div>
       <button class="btn btn-outline" style="padding: 4px 10px;" onclick="fecharPreviewCamera()">Fechar ✕</button>
     </div>
@@ -873,7 +956,7 @@ HTML_DASHBOARD = """
     </div>
     <div style="padding: 12px 20px; font-size: 11px; color: var(--text-secondary); display: flex; justify-content: space-between;">
       <span>💡 Use esta tela para ajustar foco e enquadramento da quadra.</span>
-      <span style="color: var(--accent);">Feed temporário sob demanda</span>
+      <span style="color: var(--accent);">Feed sob demanda (Fecha sozinho ao sair)</span>
     </div>
   </div>
 </div>
@@ -894,6 +977,10 @@ function trocarAba(aba) {
     document.querySelector("button[onclick*='cupons']").classList.add('active');
     document.getElementById('tab-cupons').classList.add('active');
     carregarCupons();
+  } else if (aba === 'logs') {
+    document.querySelector("button[onclick*='logs']").classList.add('active');
+    document.getElementById('tab-logs').classList.add('active');
+    carregarLogsAtividades();
   }
 }
 
@@ -952,9 +1039,16 @@ async function carregarConfiguracoes() {
     const d = await res.json();
     document.getElementById('cfg-preco').value = d.preco_replay;
     document.getElementById('cfg-buffer').value = d.duracao_buffer_segundos || 60;
-    document.getElementById('cfg-tempo-pre').value = d.tempo_pre_clique_segundos || 20;
-    document.getElementById('cfg-tempo-pos').value = d.tempo_pos_clique_segundos || 5;
+    document.getElementById('cfg-tempo-pre').value = d.tempo_pre_clique_segundos || 40;
+    document.getElementById('cfg-tempo-pos').value = d.tempo_pos_clique_segundos !== undefined ? d.tempo_pos_clique_segundos : 0;
     document.getElementById('cfg-preview').value = d.duracao_preview_segundos || 5;
+
+    if (document.getElementById('camera-a-select')) {
+      document.getElementById('camera-a-select').value = d.camera_a_index !== undefined ? d.camera_a_index : 0;
+    }
+    if (document.getElementById('camera-d-select')) {
+      document.getElementById('camera-d-select').value = d.camera_d_index !== undefined ? d.camera_d_index : 1;
+    }
   } catch (e) {}
 }
 
@@ -964,6 +1058,8 @@ async function salvarConfiguracoes() {
   const pre = parseInt(document.getElementById('cfg-tempo-pre').value);
   const pos = parseInt(document.getElementById('cfg-tempo-pos').value);
   const prev = parseInt(document.getElementById('cfg-preview').value);
+  const camA = parseInt(document.getElementById('camera-a-select').value);
+  const camD = parseInt(document.getElementById('camera-d-select').value);
   const msgEl = document.getElementById('cfg-msg');
 
   try {
@@ -975,7 +1071,9 @@ async function salvarConfiguracoes() {
         duracao_buffer_segundos: buffer,
         tempo_pre_clique_segundos: pre,
         tempo_pos_clique_segundos: pos,
-        duracao_preview_segundos: prev
+        duracao_preview_segundos: prev,
+        camera_a_index: camA,
+        camera_d_index: camD
       })
     });
     const d = await res.json();
@@ -1052,29 +1150,94 @@ async function removerCupom(id) {
   }
 }
 
-async function listarCameras() {
-  const select = document.getElementById('camera-select');
+async function carregarLogsAtividades() {
+  const tbCompras = document.getElementById('lista-logs-compras');
+  const tbDownloads = document.getElementById('lista-logs-downloads');
+
   try {
-    const res = await fetch('/api/cameras');
-    const data = await res.json();
-    select.innerHTML = '';
-    if (!data || data.length === 0) {
-      select.innerHTML = '<option value="0">Dispositivo Padrão (Índice 0)</option>';
-      return;
+    const res = await fetch('/api/logs-atividades');
+    const d = await res.json();
+
+    tbCompras.innerHTML = '';
+    if (!d.compras || d.compras.length === 0) {
+      tbCompras.innerHTML = '<tr><td colspan="4" style="color: #64748b; padding: 12px;">Nenhuma compra registrada ainda.</td></tr>';
+    } else {
+      d.compras.forEach(c => {
+        const dataFmt = new Date(c.criado_em).toLocaleString('pt-BR');
+        tbCompras.innerHTML += `
+          <tr>
+            <td style="color: #cbd5e1;">${dataFmt}</td>
+            <td style="font-weight: 600; color: white;">${c.replay_nome || 'Replay'}</td>
+            <td style="color: var(--accent); font-weight: 700;">R$ ${parseFloat(c.valor || 0).toFixed(2).replace('.', ',')}</td>
+            <td><span class="tag-code">${c.payment_id}</span></td>
+          </tr>
+        `;
+      });
     }
-    data.forEach(cam => {
-      const opt = document.createElement('option');
-      opt.value = cam.index;
-      opt.textContent = `${cam.nome} [Índice ${cam.index}] — ${cam.resolucao}`;
-      select.appendChild(opt);
-    });
+
+    tbDownloads.innerHTML = '';
+    if (!d.downloads || d.downloads.length === 0) {
+      tbDownloads.innerHTML = '<tr><td colspan="3" style="color: #64748b; padding: 12px;">Nenhum download registrado ainda.</td></tr>';
+    } else {
+      d.downloads.forEach(dw => {
+        const dataFmt = new Date(dw.baixado_em).toLocaleString('pt-BR');
+        tbDownloads.innerHTML += `
+          <tr>
+            <td style="color: #cbd5e1;">${dataFmt}</td>
+            <td style="color: var(--accent-blue); font-weight: 600;">${dw.nome_video}</td>
+            <td style="color: #94a3b8; font-family: monospace;">${dw.ip_origem || 'Local'}</td>
+          </tr>
+        `;
+      });
+    }
   } catch (e) {
-    select.innerHTML = '<option value="0">Índice 0</option>';
+    console.error("Erro ao carregar logs:", e);
   }
 }
 
-function abrirPreviewCamera() {
-  const camIdx = document.getElementById('camera-select').value;
+async function listarCameras() {
+  const selA = document.getElementById('camera-a-select');
+  const selD = document.getElementById('camera-d-select');
+  try {
+    const res = await fetch('/api/cameras');
+    const data = await res.json();
+    selA.innerHTML = '';
+    selD.innerHTML = '';
+
+    if (!data || data.length === 0) {
+      selA.innerHTML = '<option value="0">Dispositivo 0</option>';
+      selD.innerHTML = '<option value="1">Dispositivo 1</option>';
+      return;
+    }
+
+    data.forEach(cam => {
+      const optA = document.createElement('option');
+      optA.value = cam.index;
+      optA.textContent = `${cam.nome} [Índice ${cam.index}] — ${cam.resolucao}`;
+      selA.appendChild(optA);
+
+      const optD = document.createElement('option');
+      optD.value = cam.index;
+      optD.textContent = `${cam.nome} [Índice ${cam.index}] — ${cam.resolucao}`;
+      selD.appendChild(optD);
+    });
+
+    const cfgRes = await fetch('/api/configuracoes');
+    const cfg = await cfgRes.json();
+    selA.value = cfg.camera_a_index !== undefined ? cfg.camera_a_index : 0;
+    selD.value = cfg.camera_d_index !== undefined ? cfg.camera_d_index : (data.length > 1 ? data[1].index : 0);
+  } catch (e) {
+    selA.innerHTML = '<option value="0">Índice 0</option>';
+    selD.innerHTML = '<option value="1">Índice 1</option>';
+  }
+}
+
+function abrirPreviewCamera(tecla) {
+  const camIdx = tecla === 'A' 
+    ? document.getElementById('camera-a-select').value 
+    : document.getElementById('camera-d-select').value;
+
+  document.getElementById('preview-modal-title').textContent = `Preview Ao Vivo — Câmera ${tecla === 'A' ? '1 (Tecla A)' : '2 (Tecla D)'} [Dispositivo ${camIdx}]`;
   const feedImg = document.getElementById('feed-img');
   feedImg.src = `/video_feed?index=${camIdx}&t=${Date.now()}`;
   document.getElementById('camera-modal').classList.add('open');
@@ -1091,11 +1254,31 @@ async function iniciar(servico) {
 }
 
 async function iniciarCamera() {
-  const camIdx = document.getElementById('camera-select').value;
+  const camA = document.getElementById('camera-a-select').value;
+  const camD = document.getElementById('camera-d-select').value;
+  
+  // Salva os índices escolhidos no arquivo de configuração
+  await fetch('/api/configuracoes', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      preco_replay: parseFloat(document.getElementById('cfg-preco').value || 0.15),
+      duracao_buffer_segundos: parseInt(document.getElementById('cfg-buffer').value || 60),
+      tempo_pre_clique_segundos: parseInt(document.getElementById('cfg-tempo-pre').value || 40),
+      tempo_pos_clique_segundos: parseInt(document.getElementById('cfg-tempo-pos').value || 0),
+      duracao_preview_segundos: parseInt(document.getElementById('cfg-preview').value || 5),
+      camera_a_index: parseInt(camA),
+      camera_d_index: parseInt(camD)
+    })
+  });
+
   await fetch('/api/iniciar/camera', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ camera_index: camIdx })
+    body: JSON.stringify({
+      camera_a_index: camA,
+      camera_d_index: camD
+    })
   });
   setTimeout(atualizarStatus, 1000);
 }
@@ -1116,8 +1299,10 @@ function carregarTudo() {
   setTimeout(() => { if (icon) icon.classList.remove('lucide-spin'); }, 600);
 }
 
-listarCameras();
-carregarTudo();
+listarCameras().then(() => {
+  carregarTudo();
+});
+
 setInterval(atualizarStatus, 3000);
 setInterval(atualizarFinanceiro, 15000);
 setTimeout(() => { if (window.lucide) lucide.createIcons(); }, 100);

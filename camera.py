@@ -54,7 +54,7 @@ def carregar_config():
         "tempo_pos_clique_segundos": 0,
         "duracao_preview_segundos": 5,
         "camera_a_index": 0,
-        "camera_d_index": 1
+        "camera_d_index": 10
     }
     if os.path.exists(CONFIG_FILE):
         try:
@@ -115,7 +115,7 @@ def adicionar_bandwidth(file_path):
 # THREADS DE CAPTURA INDEPENDENTES
 # ============================================================
 def capturar_camera(idx, buffer_destino, tag):
-    backend = cv2.CAP_MSMF if sys.platform == "win32" else cv2.CAP_ANY
+    backend = cv2.CAP_V4L2 if sys.platform.startswith("linux") else (cv2.CAP_MSMF if sys.platform == "win32" else cv2.CAP_ANY)
     while running:
         cap = cv2.VideoCapture(int(idx), backend)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
@@ -123,15 +123,15 @@ def capturar_camera(idx, buffer_destino, tag):
         cap.set(cv2.CAP_PROP_FPS, FPS)
 
         if not cap.isOpened():
-            print(f"[ERRO] Falha ao conectar {tag} no índice {idx}. Reconectando em 5s...", flush=True)
-            time.sleep(5)
+            print(f"[ERRO] Falha ao conectar {tag} no índice {idx}. Reconectando em 3s...", flush=True)
+            time.sleep(3)
             continue
 
-        print(f"[ONLINE] {tag} ativa no dispositivo {idx}", flush=True)
+        print(f"[ONLINE] {tag} ativa no dispositivo /dev/video{idx}!", flush=True)
         while running:
             ret, frame = cap.read()
             if not ret:
-                print(f"[ALERTA] Perda de sinal em {tag}. Tentando reconectar...", flush=True)
+                print(f"[ALERTA] Perda de sinal em {tag} (/dev/video{idx}). Tentando reconectar...", flush=True)
                 break
             buffer_destino.append(frame)
 
@@ -236,7 +236,7 @@ def process_events():
                 if len(buf) > 0:
                     qtd_corte = min(len(buf), frames_necessarios)
                     frames = list(buf)[-qtd_corte:]
-                    print(f"\n[GATILHO {cam_tag.upper()}] Extraindo últimos {qtd_corte/FPS:.1f}s do lance...", flush=True)
+                    print(f"\n[GATILHO {cam_tag.upper()}] Cortando {qtd_corte/FPS:.1f}s retroativos...", flush=True)
 
                     replay = save_replay(frames, cam_tag)
                     if replay:
@@ -254,10 +254,10 @@ def main():
     global running
 
     config_inicial = carregar_config()
-    cam_a_idx = int(config_inicial.get("camera_a_index", 0))
-    cam_d_idx = int(config_inicial.get("camera_d_index", 1))
+    cam_a_idx = int(os.getenv("CAMERA_A_INDEX", str(config_inicial.get("camera_a_index", 0))))
+    cam_d_idx = int(os.getenv("CAMERA_D_INDEX", str(config_inicial.get("camera_d_index", 10))))
 
-    # Thread da fila de processamento
+    # Thread da fila de corte e envio
     threading.Thread(target=process_events, daemon=True).start()
 
     # Threads independentes de gravação circular
@@ -266,12 +266,12 @@ def main():
 
     print("\n=======================================================")
     print("      KLIP REPLAY - SISTEMA DE CÂMERAS DUPLAS         ")
-    print(f"  [A] Salva lance da CÂMERA 1 (Índice {cam_a_idx})      ")
-    print(f"  [D] Salva lance da CÂMERA 2 (Índice {cam_d_idx})      ")
+    print(f"  [A] Salva lance da CÂMERA 1 (/dev/video{cam_a_idx})  ")
+    print(f"  [D] Salva lance da CÂMERA 2 (/dev/video{cam_d_idx}) ")
     print("  [Q] Encerra o serviço                                ")
     print("=======================================================\n", flush=True)
 
-    # Mini-janela de controle de foco de teclado (sem ocupar a tela inteira)
+    # Mini-janela oculta/mínima para escutar as teclas sem ocupar tela
     cv2.namedWindow("KLIP_CONTROLE", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("KLIP_CONTROLE", 300, 80)
 

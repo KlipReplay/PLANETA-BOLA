@@ -54,7 +54,7 @@ def carregar_config_local():
         "tempo_pos_clique_segundos": 0,
         "duracao_preview_segundos": 5,
         "camera_a_index": 0,
-        "camera_d_index": 1
+        "camera_d_index": 10
     }
     if os.path.exists(CONFIG_FILE):
         try:
@@ -125,38 +125,52 @@ def obter_bandwidth():
 
 def listar_cameras_disponiveis():
     cameras = []
-    backend = cv2.CAP_MSMF if sys.platform == "win32" else cv2.CAP_ANY
+    # No Linux, lista os nós físicos do V4L2 sem tentar travar com VideoCapture (evita o erro EBUSY)
+    if sys.platform.startswith("linux"):
+        if os.path.exists("/dev"):
+            dispositivos = [d for d in os.listdir("/dev") if d.startswith("video")]
+            dispositivos.sort(key=lambda x: int(x.replace("video", "")) if x.replace("video", "").isdigit() else 999)
 
+            for dev in dispositivos:
+                try:
+                    idx = int(dev.replace("video", ""))
+                except ValueError:
+                    continue
+
+                # Pula nó de metadados comum da webcam integrada
+                if idx == 1:
+                    continue
+
+                nome = "Celular (DroidCam)" if idx >= 10 else f"Webcam Integrada (/dev/{dev})"
+                cameras.append({
+                    "index": idx,
+                    "nome": nome,
+                    "resolucao": "1280x720 (Auto)"
+                })
+        return cameras
+
+    # Fallback Windows
     if HAS_PYGRABBER and sys.platform == "win32":
         try:
             graph = FilterGraph()
             nomes_dispositivos = graph.get_input_devices()
             for idx, nome in enumerate(nomes_dispositivos):
-                cap = cv2.VideoCapture(idx, backend)
-                res = "Ocupada / Indisponível"
-                if cap.isOpened():
-                    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                    res = f"{w}x{h}"
-                    cap.release()
                 cameras.append({
                     "index": idx,
                     "nome": nome,
-                    "resolucao": res
+                    "resolucao": "Disponível"
                 })
             return cameras
-        except Exception as e:
-            print(f"[Aviso] Falha pygrabber: {e}", flush=True)
+        except Exception:
+            pass
 
     for idx in range(6):
-        cap = cv2.VideoCapture(idx, backend)
+        cap = cv2.VideoCapture(idx)
         if cap.isOpened():
-            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             cameras.append({
                 "index": idx,
                 "nome": f"Câmera {idx}",
-                "resolucao": f"{w}x{h}"
+                "resolucao": "Disponível"
             })
             cap.release()
     return cameras
@@ -296,7 +310,7 @@ def post_configuracoes():
         tempo_pos = int(dados.get("tempo_pos_clique_segundos", 0))
         duracao_prev = int(dados.get("duracao_preview_segundos", 5))
         cam_a = int(dados.get("camera_a_index", 0))
-        cam_d = int(dados.get("camera_d_index", 1))
+        cam_d = int(dados.get("camera_d_index", 10))
 
         if preco < 0.10:
             return jsonify({"erro": "O preço mínimo é R$ 0,10"}), 400
@@ -391,7 +405,7 @@ def iniciar_servico(servico):
         body = request.get_json(silent=True) or {}
         cfg = carregar_config_local()
         env["CAMERA_A_INDEX"] = str(body.get("camera_a_index", cfg.get("camera_a_index", 0)))
-        env["CAMERA_D_INDEX"] = str(body.get("camera_d_index", cfg.get("camera_d_index", 1)))
+        env["CAMERA_D_INDEX"] = str(body.get("camera_d_index", cfg.get("camera_d_index", 10)))
 
     proc = subprocess.Popen([PYTHON_EXE, script], cwd=BASE_DIR, env=env, shell=False)
     processos[servico] = proc
@@ -419,10 +433,10 @@ def parar_servico(servico):
     return jsonify({"mensagem": f"{servico} já estava parado", "status": "OFFLINE"})
 
 # ============================================================
-# STREAMING DE TESTE DA CÂMERA SOB DEMANDA (SEM JANELA FIXA)
+# STREAMING DE TESTE DA CÂMERA SOB DEMANDA
 # ============================================================
 def gerar_frames_preview(cam_idx):
-    backend = cv2.CAP_MSMF if sys.platform == "win32" else cv2.CAP_ANY
+    backend = cv2.CAP_V4L2 if sys.platform.startswith("linux") else (cv2.CAP_MSMF if sys.platform == "win32" else cv2.CAP_ANY)
     cap = cv2.VideoCapture(int(cam_idx), backend)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
@@ -431,7 +445,18 @@ def gerar_frames_preview(cam_idx):
         while True:
             sucesso, frame = cap.read()
             if not sucesso:
+                # Se a câmera já estiver ocupada pelo camera.py gravando
+                frame_aviso = cv2.imread(os.path.join(BASE_DIR, "busy_placeholder.png"))
+                if frame_aviso is None:
+                    import numpy as np
+                    frame_aviso = np.zeros((480, 640, 3), dtype=np.uint8)
+                    cv2.putText(frame_aviso, "Dispositivo Ocupado!", (50, 220), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                    cv2.putText(frame_aviso, "Pare o camera.py para testar.", (50, 270), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+                _, buffer = cv2.imencode('.jpg', frame_aviso)
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
                 break
+
             texto = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
             cv2.putText(frame, f"CAM [{cam_idx}] - {texto}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 230, 118), 2)
             
@@ -814,7 +839,7 @@ HTML_DASHBOARD = """
             <label style="font-size:12px; color:var(--text-secondary); font-weight:700;">Câmera 2 (Acionador: Tecla [D]):</label>
             <button class="btn btn-outline" style="padding: 2px 8px; font-size: 10px;" onclick="abrirPreviewCamera('D')"><i data-lucide="eye" style="width:12px;height:12px;"></i> Testar CAM 2</button>
           </div>
-          <select id="camera-d-select"><option value="1">Detectando...</option></select>
+          <select id="camera-d-select"><option value="10">Detectando...</option></select>
         </div>
       </div>
       
@@ -956,7 +981,7 @@ HTML_DASHBOARD = """
     </div>
     <div style="padding: 12px 20px; font-size: 11px; color: var(--text-secondary); display: flex; justify-content: space-between;">
       <span>💡 Use esta tela para ajustar foco e enquadramento da quadra.</span>
-      <span style="color: var(--accent);">Feed sob demanda (Fecha sozinho ao sair)</span>
+      <span style="color: var(--accent);">Feed temporário sob demanda</span>
     </div>
   </div>
 </div>
@@ -1047,7 +1072,7 @@ async function carregarConfiguracoes() {
       document.getElementById('camera-a-select').value = d.camera_a_index !== undefined ? d.camera_a_index : 0;
     }
     if (document.getElementById('camera-d-select')) {
-      document.getElementById('camera-d-select').value = d.camera_d_index !== undefined ? d.camera_d_index : 1;
+      document.getElementById('camera-d-select').value = d.camera_d_index !== undefined ? d.camera_d_index : 10;
     }
   } catch (e) {}
 }
@@ -1081,7 +1106,7 @@ async function salvarConfiguracoes() {
     if (res.ok) {
       msgEl.style.background = 'rgba(0, 230, 118, 0.15)';
       msgEl.style.color = 'var(--accent)';
-      msgEl.textContent = 'Parâmetros atualizados! camera.py e server.py aplicarão esses valores.';
+      msgEl.textContent = 'Parâmetros atualizados com sucesso!';
     } else {
       msgEl.style.background = 'rgba(239, 68, 68, 0.15)';
       msgEl.style.color = 'var(--danger)';
@@ -1091,7 +1116,7 @@ async function salvarConfiguracoes() {
     msgEl.style.display = 'block';
     msgEl.style.background = 'rgba(239, 68, 68, 0.15)';
     msgEl.style.color = 'var(--danger)';
-    msgEl.textContent = 'Erro de comunicação.';
+    msgEl.textContent = 'Erro de comunicação com o backend.';
   }
   setTimeout(() => { msgEl.style.display = 'none'; }, 4000);
 }
@@ -1206,7 +1231,7 @@ async function listarCameras() {
 
     if (!data || data.length === 0) {
       selA.innerHTML = '<option value="0">Dispositivo 0</option>';
-      selD.innerHTML = '<option value="1">Dispositivo 1</option>';
+      selD.innerHTML = '<option value="10">Dispositivo 10</option>';
       return;
     }
 
@@ -1225,10 +1250,10 @@ async function listarCameras() {
     const cfgRes = await fetch('/api/configuracoes');
     const cfg = await cfgRes.json();
     selA.value = cfg.camera_a_index !== undefined ? cfg.camera_a_index : 0;
-    selD.value = cfg.camera_d_index !== undefined ? cfg.camera_d_index : (data.length > 1 ? data[1].index : 0);
+    selD.value = cfg.camera_d_index !== undefined ? cfg.camera_d_index : 10;
   } catch (e) {
     selA.innerHTML = '<option value="0">Índice 0</option>';
-    selD.innerHTML = '<option value="1">Índice 1</option>';
+    selD.innerHTML = '<option value="10">Índice 10</option>';
   }
 }
 
@@ -1237,7 +1262,7 @@ function abrirPreviewCamera(tecla) {
     ? document.getElementById('camera-a-select').value 
     : document.getElementById('camera-d-select').value;
 
-  document.getElementById('preview-modal-title').textContent = `Preview Ao Vivo — Câmera ${tecla === 'A' ? '1 (Tecla A)' : '2 (Tecla D)'} [Dispositivo ${camIdx}]`;
+  document.getElementById('preview-modal-title').textContent = `Preview Ao Vivo — Câmera ${tecla === 'A' ? '1 (Tecla A)' : '2 (Tecla D)'} [Dispositivo /dev/video${camIdx}]`;
   const feedImg = document.getElementById('feed-img');
   feedImg.src = `/video_feed?index=${camIdx}&t=${Date.now()}`;
   document.getElementById('camera-modal').classList.add('open');
@@ -1257,7 +1282,6 @@ async function iniciarCamera() {
   const camA = document.getElementById('camera-a-select').value;
   const camD = document.getElementById('camera-d-select').value;
   
-  // Salva os índices escolhidos no arquivo de configuração
   await fetch('/api/configuracoes', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

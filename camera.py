@@ -154,7 +154,6 @@ def save_replay(frames, prefixo):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         temp = os.path.join(REPLAYS_DIR, f"temp_{prefixo}_{int(time.time())}.avi")
         
-        # MJPG para codificar imagens completas no temporario sem corromper frames
         out = cv2.VideoWriter(temp, cv2.VideoWriter_fourcc(*"MJPG"), FPS, (w, h))
         for f in frames:
             out.write(f)
@@ -162,7 +161,6 @@ def save_replay(frames, prefixo):
 
         final = os.path.join(REPLAYS_DIR, f"replay_{prefixo}_{timestamp}.mp4")
         
-        # Sincroniza PTS/DTS com -vsync 1 e gera MP4 web
         subprocess.run([
             FFMPEG_BIN, "-y",
             "-i", temp,
@@ -187,14 +185,20 @@ def save_replay(frames, prefixo):
 
 def save_preview(video_path, prefixo, duracao_preview):
     try:
+        # Garante que o arquivo base existe e tem tamanho real antes de tentar cortar
+        if not os.path.exists(video_path) or os.path.getsize(video_path) < 102400:
+            print(f"[ALERTA PREVIEW] Arquivo base {video_path} vazio ou não finalizado!", flush=True)
+            return None
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         preview_path = os.path.join(PREVIEWS_DIR, f"preview_{prefixo}_{timestamp}.mp4")
 
-        # Força I-frames a cada segundo (-g FPS) e dimensoes pares para evitar tela preta
-        subprocess.run([
+        # Recria timestamps do zero (setpts) e força o moov atom no inicio do arquivo (+faststart)
+        cmd = [
             FFMPEG_BIN, "-y",
             "-i", video_path,
             "-t", str(duracao_preview),
+            "-filter:v", "setpts=PTS-STARTPTS,scale=trunc(iw/2)*2:trunc(ih/2)*2",
             "-c:v", "libx264",
             "-pix_fmt", "yuv420p",
             "-profile:v", "baseline",
@@ -202,14 +206,24 @@ def save_preview(video_path, prefixo, duracao_preview):
             "-g", str(FPS),
             "-keyint_min", str(FPS),
             "-sc_threshold", "0",
-            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-preset", "ultrafast",
             "-movflags", "+faststart",
             "-an",
             preview_path
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        ]
 
-        if os.path.exists(preview_path):
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True)
+
+        if os.path.exists(preview_path) and os.path.getsize(preview_path) > 10240:
             return preview_path
+        else:
+            print(f"[ERRO PREVIEW] Arquivo gerado ficou com tamanho insuficiente.", flush=True)
+            return None
+
+    except subprocess.CalledProcessError as cpe:
+        err_msg = cpe.stderr.decode(errors="ignore") if cpe.stderr else str(cpe)
+        log_error(f"Erro FFmpeg save_preview ({prefixo}): {err_msg}")
+        print(f"[ERRO FFMPEG] {err_msg[:120]}", flush=True)
         return None
     except Exception as e:
         log_error(f"Erro save_preview ({prefixo}): {e}")
@@ -232,7 +246,7 @@ def upload_video(file_path, preview_path, prefixo):
         url = supabase.storage.from_("replays").get_public_url(file_name)
         preview_url = supabase.storage.from_("replays").get_public_url(preview_name)
 
-        # Coluna corrigida para 'preview_nome'
+        # Inserção correta com preview_nome[cite: 3]
         supabase.table("replays").insert({
             "nome": file_name,
             "url": url,
@@ -301,7 +315,7 @@ def main():
     print("  [Q] Encerra o serviço                                ")
     print("=======================================================\n", flush=True)
 
-    # Cria janela de monitoramento lado a lado
+    # Cria janela física de monitoramento lado a lado
     nome_janela = "KLIP REPLAY - MONITOR QUADRA (LADO A LADO)"
     cv2.namedWindow(nome_janela, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(nome_janela, 1280, 360)

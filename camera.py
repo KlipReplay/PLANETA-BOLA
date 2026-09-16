@@ -153,17 +153,27 @@ def save_replay(frames, prefixo):
         h, w, _ = frames[0].shape
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         temp = os.path.join(REPLAYS_DIR, f"temp_{prefixo}_{int(time.time())}.avi")
-        out = cv2.VideoWriter(temp, cv2.VideoWriter_fourcc(*"XVID"), FPS, (w, h))
-
+        
+        # MJPG para codificar imagens completas no temporario sem corromper frames
+        out = cv2.VideoWriter(temp, cv2.VideoWriter_fourcc(*"MJPG"), FPS, (w, h))
         for f in frames:
             out.write(f)
         out.release()
 
         final = os.path.join(REPLAYS_DIR, f"replay_{prefixo}_{timestamp}.mp4")
+        
+        # Sincroniza PTS/DTS com -vsync 1 e gera MP4 web
         subprocess.run([
-            FFMPEG_BIN, "-y", "-i", temp,
-            "-vcodec", "libx264", "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart", "-crf", "23", "-preset", "fast",
+            FFMPEG_BIN, "-y",
+            "-i", temp,
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            "-profile:v", "baseline",
+            "-level", "3.0",
+            "-movflags", "+faststart",
+            "-crf", "23",
+            "-preset", "veryfast",
+            "-vsync", "1",
             final
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
@@ -180,15 +190,18 @@ def save_preview(video_path, prefixo, duracao_preview):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         preview_path = os.path.join(PREVIEWS_DIR, f"preview_{prefixo}_{timestamp}.mp4")
 
+        # Força I-frames a cada segundo (-g FPS) e dimensoes pares para evitar tela preta
         subprocess.run([
             FFMPEG_BIN, "-y",
-            "-ss", "00:00:00",
             "-i", video_path,
             "-t", str(duracao_preview),
             "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
             "-profile:v", "baseline",
             "-level", "3.0",
-            "-pix_fmt", "yuv420p",
+            "-g", str(FPS),
+            "-keyint_min", str(FPS),
+            "-sc_threshold", "0",
             "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
             "-movflags", "+faststart",
             "-an",
@@ -219,7 +232,7 @@ def upload_video(file_path, preview_path, prefixo):
         url = supabase.storage.from_("replays").get_public_url(file_name)
         preview_url = supabase.storage.from_("replays").get_public_url(preview_name)
 
-        # Inserção com a coluna corrigida para 'preview_nome'
+        # Coluna corrigida para 'preview_nome'
         supabase.table("replays").insert({
             "nome": file_name,
             "url": url,
@@ -288,7 +301,7 @@ def main():
     print("  [Q] Encerra o serviço                                ")
     print("=======================================================\n", flush=True)
 
-    # Cria janela física de monitoramento lado a lado
+    # Cria janela de monitoramento lado a lado
     nome_janela = "KLIP REPLAY - MONITOR QUADRA (LADO A LADO)"
     cv2.namedWindow(nome_janela, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(nome_janela, 1280, 360)

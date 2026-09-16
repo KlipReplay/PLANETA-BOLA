@@ -10,6 +10,7 @@ from datetime import datetime
 from queue import Queue
 
 import cv2
+import numpy as np
 from dotenv import load_dotenv
 from supabase import create_client
 
@@ -42,7 +43,7 @@ else:
     FFMPEG_BIN = shutil.which("ffmpeg") or "ffmpeg"
 
 # ============================================================
-# PARÂMETROS OPERACIONAIS
+# PARÂMETROS OPERACIONAIS E CONFIGURAÇÃO
 # ============================================================
 FPS = int(os.getenv("CAMERA_FPS", "30"))
 
@@ -79,7 +80,7 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ============================================================
-# BUFFERS CIRCULARES E FILA DE PROCESSAMENTO
+# BUFFERS CIRCULARES E CONTROLE DE EXECUÇÃO
 # ============================================================
 running = True
 MAX_BUFFER_SEGUNDOS = int(cfg.get("duracao_buffer_segundos", 60))
@@ -115,23 +116,29 @@ def adicionar_bandwidth(file_path):
 # THREADS DE CAPTURA INDEPENDENTES
 # ============================================================
 def capturar_camera(idx, buffer_destino, tag):
-    backend = cv2.CAP_V4L2 if sys.platform.startswith("linux") else (cv2.CAP_MSMF if sys.platform == "win32" else cv2.CAP_ANY)
+    if sys.platform.startswith("linux"):
+        cap_target = f"/dev/video{idx}"
+        backend = cv2.CAP_V4L2
+    else:
+        cap_target = int(idx)
+        backend = cv2.CAP_MSMF if sys.platform == "win32" else cv2.CAP_ANY
+
     while running:
-        cap = cv2.VideoCapture(int(idx), backend)
+        cap = cv2.VideoCapture(cap_target, backend)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
         cap.set(cv2.CAP_PROP_FPS, FPS)
 
         if not cap.isOpened():
-            print(f"[ERRO] Falha ao conectar {tag} no índice {idx}. Reconectando em 3s...", flush=True)
+            print(f"[ERRO] Falha ao conectar {tag} em {cap_target}. Reconectando em 3s...", flush=True)
             time.sleep(3)
             continue
 
-        print(f"[ONLINE] {tag} ativa no dispositivo /dev/video{idx}!", flush=True)
+        print(f"[ONLINE] {tag} conectada em {cap_target}!", flush=True)
         while running:
             ret, frame = cap.read()
             if not ret:
-                print(f"[ALERTA] Perda de sinal em {tag} (/dev/video{idx}). Tentando reconectar...", flush=True)
+                print(f"[ALERTA] Perda de sinal em {tag} ({cap_target}). Tentando reconectar...", flush=True)
                 break
             buffer_destino.append(frame)
 
@@ -172,10 +179,19 @@ def save_preview(video_path, prefixo, duracao_preview):
     try:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         preview_path = os.path.join(PREVIEWS_DIR, f"preview_{prefixo}_{timestamp}.mp4")
+
         subprocess.run([
-            FFMPEG_BIN, "-y", "-i", video_path, "-t", str(duracao_preview),
-            "-vcodec", "libx264", "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart", "-crf", "28", "-preset", "fast", "-an",
+            FFMPEG_BIN, "-y",
+            "-ss", "00:00:00",
+            "-i", video_path,
+            "-t", str(duracao_preview),
+            "-c:v", "libx264",
+            "-profile:v", "baseline",
+            "-level", "3.0",
+            "-pix_fmt", "yuv420p",
+            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-movflags", "+faststart",
+            "-an",
             preview_path
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
@@ -203,20 +219,21 @@ def upload_video(file_path, preview_path, prefixo):
         url = supabase.storage.from_("replays").get_public_url(file_name)
         preview_url = supabase.storage.from_("replays").get_public_url(preview_name)
 
+        # Inserção com a coluna corrigida para 'preview_nome'
         supabase.table("replays").insert({
             "nome": file_name,
             "url": url,
             "preview_url": preview_url,
-            "preview_nom": preview_name
+            "preview_nome": preview_name
         }).execute()
 
         adicionar_bandwidth(file_path)
         adicionar_bandwidth(preview_path)
-        print(f"[CONCLUÍDO] Replay da {prefixo} sincronizado na nuvem!\nURL: {url}", flush=True)
+        print(f"[CONCLUÍDO] Replay da {prefixo} inserido na tabela com sucesso!\nURL: {url}", flush=True)
         return url
     except Exception as e:
         log_error(f"Erro upload_video ({prefixo}): {e}")
-        print(f"[ERRO] Falha ao enviar para o Supabase: {e}", flush=True)
+        print(f"[ERRO] Falha ao enviar/inserir no Supabase: {e}", flush=True)
         return None
 
 
@@ -236,7 +253,7 @@ def process_events():
                 if len(buf) > 0:
                     qtd_corte = min(len(buf), frames_necessarios)
                     frames = list(buf)[-qtd_corte:]
-                    print(f"\n[GATILHO {cam_tag.upper()}] Cortando {qtd_corte/FPS:.1f}s retroativos...", flush=True)
+                    print(f"\n[GATILHO {cam_tag.upper()}] Extraindo últimos {qtd_corte/FPS:.1f}s...", flush=True)
 
                     replay = save_replay(frames, cam_tag)
                     if replay:
@@ -248,7 +265,7 @@ def process_events():
         time.sleep(0.01)
 
 # ============================================================
-# INICIALIZAÇÃO
+# LOOP PRINCIPAL COM MONITORAMENTO VISUAL DUPLO
 # ============================================================
 def main():
     global running
@@ -257,10 +274,10 @@ def main():
     cam_a_idx = int(os.getenv("CAMERA_A_INDEX", str(config_inicial.get("camera_a_index", 0))))
     cam_d_idx = int(os.getenv("CAMERA_D_INDEX", str(config_inicial.get("camera_d_index", 10))))
 
-    # Thread da fila de corte e envio
+    # Inicializa thread consumidora da fila de exportação/upload
     threading.Thread(target=process_events, daemon=True).start()
 
-    # Threads independentes de gravação circular
+    # Inicializa threads de gravação contínua nos buffers
     threading.Thread(target=capturar_camera, args=(cam_a_idx, buffer_cam_a, "CÂMERA 1 (A)"), daemon=True).start()
     threading.Thread(target=capturar_camera, args=(cam_d_idx, buffer_cam_d, "CÂMERA 2 (D)"), daemon=True).start()
 
@@ -271,12 +288,47 @@ def main():
     print("  [Q] Encerra o serviço                                ")
     print("=======================================================\n", flush=True)
 
-    # Mini-janela oculta/mínima para escutar as teclas sem ocupar tela
-    cv2.namedWindow("KLIP_CONTROLE", cv2.WINDOW_NORMAL)
-    cv2.resizeWindow("KLIP_CONTROLE", 300, 80)
+    # Cria janela física de monitoramento lado a lado
+    nome_janela = "KLIP REPLAY - MONITOR QUADRA (LADO A LADO)"
+    cv2.namedWindow(nome_janela, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(nome_janela, 1280, 360)
+
+    largura_sub = 640
+    altura_sub = 360
 
     try:
         while running:
+            # Frame da Câmera 1 (A)
+            if len(buffer_cam_a) > 0:
+                frame_a = cv2.resize(buffer_cam_a[-1], (largura_sub, altura_sub))
+                cv2.putText(frame_a, f"CAM 1 [A] - /dev/video{cam_a_idx}", (20, 35),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 230, 118), 2)
+            else:
+                frame_a = np.zeros((altura_sub, largura_sub, 3), dtype=np.uint8)
+                cv2.putText(frame_a, "CAM 1 CONECTANDO...", (40, 180),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+            # Frame da Câmera 2 (D)
+            if len(buffer_cam_d) > 0:
+                frame_d = cv2.resize(buffer_cam_d[-1], (largura_sub, altura_sub))
+                cv2.putText(frame_d, f"CAM 2 [D] - /dev/video{cam_d_idx}", (20, 35),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (56, 189, 248), 2)
+            else:
+                frame_d = np.zeros((altura_sub, largura_sub, 3), dtype=np.uint8)
+                cv2.putText(frame_d, "CAM 2 CONECTANDO...", (40, 180),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+            # Mescla os dois feeds horizontalmente
+            tela_dupla = cv2.hconcat([frame_a, frame_d])
+
+            # Linha divisória e relógio no rodapé
+            cv2.line(tela_dupla, (largura_sub, 0), (largura_sub, altura_sub), (50, 60, 80), 2)
+            relogio = datetime.now().strftime("%H:%M:%S")
+            cv2.putText(tela_dupla, relogio, (largura_sub - 45, 345),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+            cv2.imshow(nome_janela, tela_dupla)
+
             key = cv2.waitKey(30) & 0xFF
             if key in (ord("a"), ord("A")):
                 event_queue.put({"cam": "cam1"})
@@ -284,6 +336,7 @@ def main():
                 event_queue.put({"cam": "cam2"})
             elif key in (ord("q"), ord("Q")):
                 break
+
     except KeyboardInterrupt:
         pass
     finally:

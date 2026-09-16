@@ -5,3 +5,5 @@
 [2026-09-14 19:13:15] Erro save_replay: [Errno 2] Arquivo ou diretório inexistente: 'ffmpeg'
 [2026-09-14 23:29:19] Erro upload_video (cam2): {'message': "Could not find the 'preview_nom' column of 'replays' in the schema cache", 'code': 'PGRST204', 'hint': None, 'details': None}
 [2026-09-14 23:29:30] Erro upload_video (cam1): {'message': "Could not find the 'preview_nom' column of 'replays' in the schema cache", 'code': 'PGRST204', 'hint': None, 'details': None}
+[2026-09-15 10:09:39] Erro upload_video (cam1): {'message': "Could not find the 'preview_nom' column of 'replays' in the schema cache", 'code': 'PGRST204', 'hint': None, 'details': None}
+[2026-09-15 10:09:54] Erro upload_video (cam2): {'message': "Could not find the 'preview_nom' column of 'replays' in the schema cache", 'code': 'PGRST204', 'hint': None, 'details': None}
